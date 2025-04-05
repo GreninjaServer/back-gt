@@ -34,8 +34,5 @@ venv/
 *.swp
 *.swo
 
-# Keyboard removal script
-remove_keyboard.py
-
 # Logs
 *.log 
