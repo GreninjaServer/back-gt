@@ -539,7 +539,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Relay the message content directly to admin
     message_content = update.message.text
     
-    # Send plain message to admin
+    # Send plain message to admin WITHOUT metadata header
     admin_msg = await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=message_content
@@ -568,21 +568,20 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # Map the admin message ID to the group message ID
             context.bot_data['message_map'][str(admin_msg.message_id)] = {
                 'chat_id': GROUP_ID,
-                'message_id': group_msg.message_id
+                'message_id': group_msg.message_id,
+                'sender_id': user_id,
+                'sender_name': user_name
             }
             
-            # Send a reply to the admin message with quick actions
-            keyboard = [
-                [InlineKeyboardButton("Reply", callback_data=f"reply_{user_id}")],
-                [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}"),
-                 InlineKeyboardButton("Show Details", callback_data=f"showme_{admin_msg.message_id}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await admin_msg.reply_text(
-                f"Message from {user_name} (ID: {user_id})",
-                reply_markup=reply_markup
-            )
+            # Send a single small note about /showme once per conversation
+            if not context.user_data.get('showme_info_sent'):
+                info_msg = await admin_msg.reply_text(
+                    "Reply with /showme to see full message details in backup group.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                context.user_data['showme_info_sent'] = True
+                # Delete this info after 10 seconds
+                asyncio.create_task(delete_message_after_delay(info_msg, 10))
             
         except Exception as e:
             logger.error(f"Failed to relay message to group: {e}")
@@ -591,14 +590,13 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     confirm_msg = await update.message.reply_text("Message sent")
     
     # Delete confirmation after a short delay
-    async def delete_confirmation():
-        await asyncio.sleep(3)  # Wait 3 seconds
-        try:
-            await confirm_msg.delete()
-        except Exception as e:
-            logger.error(f"Could not delete confirmation: {e}")
+    asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
     
-    asyncio.create_task(delete_confirmation())
+    # Delete the original message from the user for privacy
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete user message: {e}")
 
 async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Link to the original message in the backup group"""
@@ -635,8 +633,20 @@ async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Create the message link
         message_link = f"https://t.me/c/{clean_group_id}/{group_msg_id}"
         
+        # Create clickable button to view the message
+        keyboard = [[InlineKeyboardButton("View Message Details", url=message_link)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Get sender info if available
+        sender_name = group_info.get('sender_name', 'Unknown')
+        sender_id = group_info.get('sender_id', 'Unknown')
+        
         await update.message.reply_text(
-            f"[View full message details]({message_link})",
+            f"*Message Info:*\n"
+            f"• From: {sender_name}\n"
+            f"• ID: `{sender_id}`\n\n"
+            f"Click the button below to view full details in the backup group:",
+            reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
     else:
@@ -927,7 +937,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # Forward media to admin
     try:
-        # Send media to admin
+        # Send media to admin (just the media, no header text)
         admin_msg = None
         if media_type == "Photo":
             admin_msg = await context.bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption)
@@ -949,19 +959,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Forward unknown media types directly
             admin_msg = await update.message.forward(chat_id=ADMIN_ID)
         
-        # Send a reply to the admin message with quick actions
-        keyboard = [
-            [InlineKeyboardButton("Reply", callback_data=f"reply_{user_id}")],
-            [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"{media_type} from {user_name} (ID: {user_id})",
-            reply_markup=reply_markup
-        )
-        
         # Send detailed info to group if configured
         if GROUP_ID and admin_msg:
             group_info = (
@@ -972,11 +969,33 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if caption:
                 group_info += f"\n\n*Caption:* {caption}"
             
-            await context.bot.send_message(
+            group_msg = await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=group_info,
                 parse_mode=ParseMode.MARKDOWN
             )
+            
+            # Store message mapping for /showme command
+            if not hasattr(context.bot_data, 'message_map'):
+                context.bot_data['message_map'] = {}
+            
+            # Map the admin message ID to the group message ID
+            context.bot_data['message_map'][str(admin_msg.message_id)] = {
+                'chat_id': GROUP_ID,
+                'message_id': group_msg.message_id,
+                'sender_id': user_id,
+                'sender_name': user_name
+            }
+            
+            # Send a single small note about /showme once per conversation
+            if not context.user_data.get('showme_info_sent'):
+                info_msg = await admin_msg.reply_text(
+                    "Reply with /showme to see full message details in backup group.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                context.user_data['showme_info_sent'] = True
+                # Delete this info after 10 seconds
+                asyncio.create_task(delete_message_after_delay(info_msg, 10))
     
     except Exception as e:
         logger.error(f"Failed to relay media: {e}")
@@ -988,6 +1007,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # Delete confirmation after a short delay
     asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
+    
+    # Delete the original message from the user for privacy
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete user media: {e}")
 
 async def register_bot_commands(application: Application) -> None:
     """Register bot commands with Telegram to show in the command menu."""
