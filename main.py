@@ -929,19 +929,11 @@ def main() -> None:
     # Button callback handler
     application.add_handler(CallbackQueryHandler(button_callback))
     
-    # Message handlers
+    # Message handlers - using simplified filters
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay_message))
     
-    # Media handlers with correct class-based filters
-    media_filter = (
-        filters.Photo.ALL |
-        filters.Document.ALL |
-        filters.Video.ALL |
-        filters.Voice.ALL |
-        filters.Audio.ALL |
-        filters.Sticker.ALL
-    )
-    application.add_handler(MessageHandler(media_filter, handle_media))
+    # Media handler for all non-text messages
+    application.add_handler(MessageHandler(~filters.TEXT, handle_media))
     
     # Error handler
     application.add_error_handler(error_handler)
