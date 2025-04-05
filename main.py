@@ -822,6 +822,66 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             logger.error(f"Failed to send error notification: {e}")
 
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle non-text media messages."""
+    # Use the same relay_message function for media
+    await relay_message(update, context)
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check system status or user authentication status."""
+    user_id = update.effective_user.id
+    
+    if user_id == ADMIN_ID:
+        # Admin gets system status
+        num_authenticated = len(bot_data.authenticated_users)
+        num_blocked = len(bot_data.blocked_users)
+        
+        # Format uptime
+        try:
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.readline().split()[0])
+                uptime_str = str(datetime.timedelta(seconds=uptime_seconds)).split('.')[0]
+        except:
+            uptime_str = "Unknown"
+        
+        status_text = (
+            "*System Status:*\n"
+            f"• Authenticated users: {num_authenticated}\n"
+            f"• Blocked users: {num_blocked}\n"
+            f"• System uptime: {uptime_str}\n"
+            f"• Bot status: Running"
+        )
+        
+        await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        # Regular users get authentication status
+        if str(user_id) in bot_data.authenticated_users:
+            user_data = bot_data.authenticated_users[str(user_id)]
+            auth_time = datetime.fromisoformat(user_data.get("timestamp", ""))
+            last_activity = datetime.fromisoformat(user_data.get("last_activity", ""))
+            
+            # Update last activity time
+            bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
+            bot_data.save_to_file()
+            
+            # Calculate remaining time
+            now = datetime.now()
+            time_diff = now - last_activity
+            remaining_mins = max(0, 15 - int(time_diff.total_seconds() / 60))
+            
+            status_text = (
+                "*Your Authentication Status:*\n"
+                f"• Status: Authenticated\n"
+                f"• Authenticated since: {auth_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"• Session expires in: {remaining_mins} minutes\n"
+            )
+            
+            await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(
+                "You are not currently authenticated. Please use /start to authenticate."
+            )
+
 def main() -> None:
     """Start the bot."""
     # Create the Application
