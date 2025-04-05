@@ -19,6 +19,13 @@ import asyncio
 from telegram.constants import ParseMode
 import time
 
+# Try to import psutil for better uptime info, but it's optional
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 # Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -1039,9 +1046,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except FileNotFoundError:
             # Fall back to a different method for Windows
             try:
-                import psutil
-                uptime_seconds = time.time() - psutil.boot_time()
-                uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds))).split('.')[0]
+                if HAS_PSUTIL:
+                    uptime_seconds = time.time() - psutil.boot_time()
+                    uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds))).split('.')[0]
+                else:
+                    uptime_str = "Unknown (psutil not installed)"
             except:
                 uptime_str = "Unknown"
         except:
@@ -1141,8 +1150,8 @@ def main() -> None:
     # Error handler
     application.add_error_handler(error_handler)
     
-    # Register bot commands
-    asyncio.create_task(register_bot_commands(application))
+    # Register bot commands on startup
+    application.post_init = register_bot_commands
     
     # Determine if running on Railway
     if RAILWAY_STATIC_URL:
