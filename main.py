@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Any
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 import asyncio
 from telegram.constants import ParseMode
+import time
 
 # Load environment variables
 load_dotenv()
@@ -89,7 +90,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     # If it's the admin, authenticate immediately
     if user_id == ADMIN_ID:
-        bot_data.authenticated_users[user_id] = {
+        bot_data.authenticated_users[str(user_id)] = {
             "name": user_name,
             "timestamp": datetime.now().isoformat(),
             "last_activity": datetime.now().isoformat(),
@@ -146,9 +147,12 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         except Exception as e:
             logger.warning(f"Could not delete non-reply authentication message: {e}")
         
-        await update.message.reply_text(
+        error_msg = await update.message.reply_text(
             "Please reply directly to the authentication question."
         )
+        
+        # Schedule deletion of error message
+        asyncio.create_task(delete_message_after_delay(error_msg, 5))
         return AWAITING_AUTH_REPLY
     
     # Check if the answer matches
@@ -168,8 +172,8 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.warning(f"Could not delete authentication question: {e}")
     
     if message_text.lower() == correct_answer.lower():
-        # Authenticate the user
-        bot_data.authenticated_users[user_id] = {
+        # Authenticate the user - IMPORTANT: Store as string key
+        bot_data.authenticated_users[str(user_id)] = {
             "name": user_name,
             "timestamp": datetime.now().isoformat(),
             "last_activity": datetime.now().isoformat(),
@@ -180,6 +184,9 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         success_msg = await update.message.reply_text(
             "Authentication successful! You can now use the bot to send messages to the admin."
         )
+        
+        # Schedule deletion of success message
+        asyncio.create_task(delete_message_after_delay(success_msg, 10))
         
         # Notify admin about new authentication with terminate button
         keyboard = [
@@ -200,9 +207,12 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
         return ConversationHandler.END
     else:
-        await update.message.reply_text(
+        error_msg = await update.message.reply_text(
             "Authentication failed. Please try again with /start"
         )
+        
+        # Schedule deletion of error message
+        asyncio.create_task(delete_message_after_delay(error_msg, 5))
         return ConversationHandler.END
 
 async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -497,8 +507,8 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text("Message received.")
         return
     
-    # Check if user is authenticated
-    if user_id not in bot_data.authenticated_users:
+    # Check if user is authenticated - IMPORTANT FIX: Convert user_id to str for dictionary lookup
+    if str(user_id) not in bot_data.authenticated_users:
         await update.message.reply_text("You need to authenticate first. Please use /start command.")
         return
     
@@ -516,9 +526,8 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     
     # Update last activity timestamp
-    if str(user_id) in bot_data.authenticated_users:
-        bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
-        bot_data.save_to_file()
+    bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
+    bot_data.save_to_file()
     
     # Relay the message content directly to admin
     message_content = update.message.text
@@ -671,11 +680,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.effective_user.id
     
     if user_id == ADMIN_ID:
-        await cmd_command(update, context)
-    else:
-        await update.message.reply_text(
-            "Send /start to authenticate and then simply send messages that you want to relay to the admin."
+        help_text = (
+            "*🤖 GT-UP Bot - Admin Help*\n\n"
+            "This bot allows users to send you messages after authentication.\n\n"
+            "*Key Features:*\n"
+            "• Secure authentication with custom security question\n"
+            "• Backup group for message logging\n"
+            "• Session management (15-minute timeout)\n"
+            "• User blocking capabilities\n\n"
+            "Use /cmd to see all available commands."
         )
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        help_text = (
+            "*🤖 GT-UP Bot - Help*\n\n"
+            "This bot allows you to send messages to the admin.\n\n"
+            "*How to use:*\n"
+            "1. Use /start to authenticate\n"
+            "2. Answer the security question correctly\n"
+            "3. Send your message once authenticated\n\n"
+            "*Notes:*\n"
+            "• Your session expires after 15 minutes of inactivity\n"
+            "• Use /status to check your authentication status"
+        )
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
@@ -824,8 +852,174 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle non-text media messages."""
-    # Use the same relay_message function for media
-    await relay_message(update, context)
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Check if message is in private chat
+    if update.effective_chat.type != "private":
+        # Don't relay messages from groups
+        return
+    
+    # If it's the admin, handle admin commands or acknowledge
+    if user_id == ADMIN_ID:
+        # Just acknowledge
+        await update.message.reply_text("Media received.")
+        return
+    
+    # Check if user is authenticated
+    if str(user_id) not in bot_data.authenticated_users:
+        await update.message.reply_text("You need to authenticate first. Please use /start command.")
+        return
+    
+    # Check if authentication has expired (15 minute timeout)
+    user_data = bot_data.authenticated_users.get(str(user_id), {})
+    last_activity = user_data.get("last_activity", "")
+    
+    if not last_activity or not await check_authentication(user_id, last_activity):
+        # Authentication expired
+        if str(user_id) in bot_data.authenticated_users:
+            del bot_data.authenticated_users[str(user_id)]
+            bot_data.save_to_file()
+        
+        await update.message.reply_text("Your session has expired. Please authenticate again with /start")
+        return
+    
+    # Update last activity timestamp
+    bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
+    bot_data.save_to_file()
+    
+    # Determine media type and relay to admin
+    media_type = "Unknown"
+    file_id = None
+    caption = update.message.caption or ""
+    
+    if update.message.photo:
+        media_type = "Photo"
+        file_id = update.message.photo[-1].file_id  # Get the largest photo
+    elif update.message.video:
+        media_type = "Video"
+        file_id = update.message.video.file_id
+    elif update.message.audio:
+        media_type = "Audio"
+        file_id = update.message.audio.file_id
+    elif update.message.voice:
+        media_type = "Voice"
+        file_id = update.message.voice.file_id
+    elif update.message.document:
+        media_type = "Document"
+        file_id = update.message.document.file_id
+    elif update.message.sticker:
+        media_type = "Sticker"
+        file_id = update.message.sticker.file_id
+    elif update.message.animation:
+        media_type = "Animation"
+        file_id = update.message.animation.file_id
+    elif update.message.video_note:
+        media_type = "Video Note"
+        file_id = update.message.video_note.file_id
+    
+    # Forward media to admin
+    try:
+        # Send media to admin
+        admin_msg = None
+        if media_type == "Photo":
+            admin_msg = await context.bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption)
+        elif media_type == "Video":
+            admin_msg = await context.bot.send_video(chat_id=ADMIN_ID, video=file_id, caption=caption)
+        elif media_type == "Audio":
+            admin_msg = await context.bot.send_audio(chat_id=ADMIN_ID, audio=file_id, caption=caption)
+        elif media_type == "Voice":
+            admin_msg = await context.bot.send_voice(chat_id=ADMIN_ID, voice=file_id, caption=caption)
+        elif media_type == "Document":
+            admin_msg = await context.bot.send_document(chat_id=ADMIN_ID, document=file_id, caption=caption)
+        elif media_type == "Sticker":
+            admin_msg = await context.bot.send_sticker(chat_id=ADMIN_ID, sticker=file_id)
+        elif media_type == "Animation":
+            admin_msg = await context.bot.send_animation(chat_id=ADMIN_ID, animation=file_id, caption=caption)
+        elif media_type == "Video Note":
+            admin_msg = await context.bot.send_video_note(chat_id=ADMIN_ID, video_note=file_id)
+        else:
+            # Forward unknown media types directly
+            admin_msg = await update.message.forward(chat_id=ADMIN_ID)
+        
+        # Send a reply to the admin message with quick actions
+        keyboard = [
+            [InlineKeyboardButton("Reply", callback_data=f"reply_{user_id}")],
+            [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"{media_type} from {user_name} (ID: {user_id})",
+            reply_markup=reply_markup
+        )
+        
+        # Send detailed info to group if configured
+        if GROUP_ID and admin_msg:
+            group_info = (
+                f"📨 *{media_type} from {user_name}*\n"
+                f"👤 ID: `{user_id}`\n"
+                f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            if caption:
+                group_info += f"\n\n*Caption:* {caption}"
+            
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=group_info,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    except Exception as e:
+        logger.error(f"Failed to relay media: {e}")
+        await update.message.reply_text("Failed to send media. Please try again later.")
+        return
+    
+    # Send confirmation that will be deleted
+    confirm_msg = await update.message.reply_text(f"{media_type} sent")
+    
+    # Delete confirmation after a short delay
+    asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
+
+async def register_bot_commands(application: Application) -> None:
+    """Register bot commands with Telegram to show in the command menu."""
+    # Define commands for regular users
+    user_commands = [
+        ("start", "Start the bot and authenticate"),
+        ("status", "Check your authentication status"),
+        ("help", "Show help information")
+    ]
+    
+    # Define commands for admin
+    admin_commands = [
+        ("start", "Start the bot and authenticate"),
+        ("help", "Show help information"),
+        ("status", "Check system status"),
+        ("cmd", "Show command list"),
+        ("setupgroup", "Set current group as backup group"),
+        ("broadcast", "Send message to all users"),
+        ("block", "Block a user"),
+        ("unblock", "Unblock a user"),
+        ("users", "List all authenticated users"),
+        ("setquestion", "Set security question"),
+        ("showme", "Show message details in backup group")
+    ]
+    
+    # Set commands for regular users (visible in private chats)
+    await application.bot.set_my_commands(
+        [BotCommand(command, description) for command, description in user_commands],
+        scope=BotCommandScopeAllPrivateChats()
+    )
+    
+    # Set commands for admin (visible only to admin)
+    if ADMIN_ID:
+        await application.bot.set_my_commands(
+            [BotCommand(command, description) for command, description in admin_commands],
+            scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+        )
+    
+    logger.info("Bot commands registered")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check system status or user authentication status."""
@@ -836,20 +1030,33 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         num_authenticated = len(bot_data.authenticated_users)
         num_blocked = len(bot_data.blocked_users)
         
-        # Format uptime
+        # Format uptime - with Windows compatibility
         try:
+            # Try Linux-style uptime
             with open('/proc/uptime', 'r') as f:
                 uptime_seconds = float(f.readline().split()[0])
                 uptime_str = str(datetime.timedelta(seconds=uptime_seconds)).split('.')[0]
+        except FileNotFoundError:
+            # Fall back to a different method for Windows
+            try:
+                import psutil
+                uptime_seconds = time.time() - psutil.boot_time()
+                uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds))).split('.')[0]
+            except:
+                uptime_str = "Unknown"
         except:
             uptime_str = "Unknown"
+            
+        # Get bot version info
+        version_info = "1.0.0"  # You can update this manually or use a version file
         
         status_text = (
             "*System Status:*\n"
             f"• Authenticated users: {num_authenticated}\n"
             f"• Blocked users: {num_blocked}\n"
             f"• System uptime: {uptime_str}\n"
-            f"• Bot status: Running"
+            f"• Bot version: {version_info}\n"
+            f"• Bot status: Running ✅"
         )
         
         await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
@@ -871,7 +1078,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             
             status_text = (
                 "*Your Authentication Status:*\n"
-                f"• Status: Authenticated\n"
+                f"• Status: Authenticated ✅\n"
                 f"• Authenticated since: {auth_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"• Session expires in: {remaining_mins} minutes\n"
             )
@@ -879,8 +1086,21 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text(
-                "You are not currently authenticated. Please use /start to authenticate."
+                "*Your Authentication Status:*\n"
+                "• Status: Not authenticated ❌\n\n"
+                "Please use /start to authenticate.",
+                parse_mode=ParseMode.MARKDOWN
             )
+
+async def delete_message_after_delay(message, delay_seconds):
+    """Delete a message after a specified delay."""
+    await asyncio.sleep(delay_seconds)
+    try:
+        await message.delete()
+    except Exception as e:
+        # Don't log common errors like "message to delete not found"
+        if "message to delete not found" not in str(e).lower():
+            logger.warning(f"Could not delete message: {e}")
 
 def main() -> None:
     """Start the bot."""
@@ -920,6 +1140,9 @@ def main() -> None:
     
     # Error handler
     application.add_error_handler(error_handler)
+    
+    # Register bot commands
+    asyncio.create_task(register_bot_commands(application))
     
     # Determine if running on Railway
     if RAILWAY_STATIC_URL:
