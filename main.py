@@ -482,36 +482,10 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Don't relay messages from groups
         return
     
-    # If it's the admin, handle admin commands or acknowledge
+    # If it's the admin, just acknowledge
     if user_id == ADMIN_ID:
-        # Check if replying to a forwarded message
-        if update.message.reply_to_message:
-            # Try to extract the original sender's ID from the forwarded message
-            try:
-                original_message = update.message.reply_to_message.text
-                match = re.search(r"ID: (\d+)", original_message)
-                if match:
-                    target_id = int(match.group(1))
-                    reply_text = update.message.text
-                    
-                    # Send the admin's reply to the original sender
-                    try:
-                        await context.bot.send_message(
-                            chat_id=target_id,
-                            text=f"*Reply from Admin:*\n\n{reply_text}",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                        await update.message.reply_text("✅ Reply sent to user!")
-                    except Exception as e:
-                        logger.error(f"Failed to send reply: {e}")
-                        await update.message.reply_text(f"❌ Failed to send reply: {e}")
-                else:
-                    await update.message.reply_text("Could not determine the original sender.")
-            except Exception as e:
-                await update.message.reply_text(f"Error processing reply: {e}")
-        else:
-            # Regular message from admin, just acknowledge
-            await update.message.reply_text("Message received.")
+        # Just acknowledge, no reply functionality needed
+        await update.message.reply_text("Message received.")
         return
     
     # Check if user is authenticated - IMPORTANT FIX: Convert user_id to str for dictionary lookup
@@ -536,8 +510,15 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
     bot_data.save_to_file()
     
-    # Relay the message content directly to admin
+    # Get the message content
     message_content = update.message.text
+    message_id = update.message.message_id
+    
+    # IMPORTANT: Delete the original message first, before sending any confirmation
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete user message: {e}")
     
     # Send plain message to admin WITHOUT metadata header
     admin_msg = await context.bot.send_message(
@@ -587,16 +568,13 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.error(f"Failed to relay message to group: {e}")
     
     # Send confirmation that will be deleted
-    confirm_msg = await update.message.reply_text("Message sent")
+    confirm_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Message sent"
+    )
     
     # Delete confirmation after a short delay
     asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
-    
-    # Delete the original message from the user for privacy
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.warning(f"Could not delete user message: {e}")
 
 async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Link to the original message in the backup group"""
@@ -877,7 +855,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Don't relay messages from groups
         return
     
-    # If it's the admin, handle admin commands or acknowledge
+    # If it's the admin, just acknowledge
     if user_id == ADMIN_ID:
         # Just acknowledge
         await update.message.reply_text("Media received.")
@@ -935,6 +913,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         media_type = "Video Note"
         file_id = update.message.video_note.file_id
     
+    # IMPORTANT: Save the original message before deleting it
+    # This needs to happen before we delete the message
+    original_message = update.message
+    
+    # Try to delete the original message first
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete user media: {e}")
+    
     # Forward media to admin
     try:
         # Send media to admin (just the media, no header text)
@@ -957,10 +945,33 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             admin_msg = await context.bot.send_video_note(chat_id=ADMIN_ID, video_note=file_id)
         else:
             # Forward unknown media types directly
-            admin_msg = await update.message.forward(chat_id=ADMIN_ID)
+            admin_msg = await original_message.forward(chat_id=ADMIN_ID)
         
-        # Send detailed info to group if configured
+        # Send detailed info AND the media to the backup group
         if GROUP_ID and admin_msg:
+            # First send the media file to the group
+            group_media_msg = None
+            if media_type == "Photo":
+                group_media_msg = await context.bot.send_photo(chat_id=GROUP_ID, photo=file_id, caption=caption)
+            elif media_type == "Video":
+                group_media_msg = await context.bot.send_video(chat_id=GROUP_ID, video=file_id, caption=caption)
+            elif media_type == "Audio":
+                group_media_msg = await context.bot.send_audio(chat_id=GROUP_ID, audio=file_id, caption=caption)
+            elif media_type == "Voice":
+                group_media_msg = await context.bot.send_voice(chat_id=GROUP_ID, voice=file_id, caption=caption)
+            elif media_type == "Document":
+                group_media_msg = await context.bot.send_document(chat_id=GROUP_ID, document=file_id, caption=caption)
+            elif media_type == "Sticker":
+                group_media_msg = await context.bot.send_sticker(chat_id=GROUP_ID, sticker=file_id)
+            elif media_type == "Animation":
+                group_media_msg = await context.bot.send_animation(chat_id=GROUP_ID, animation=file_id, caption=caption)
+            elif media_type == "Video Note":
+                group_media_msg = await context.bot.send_video_note(chat_id=GROUP_ID, video_note=file_id)
+            else:
+                # Forward unknown media types directly
+                group_media_msg = await original_message.forward(chat_id=GROUP_ID)
+            
+            # Then send the info message
             group_info = (
                 f"📨 *{media_type} from {user_name}*\n"
                 f"👤 ID: `{user_id}`\n"
@@ -979,12 +990,15 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if not hasattr(context.bot_data, 'message_map'):
                 context.bot_data['message_map'] = {}
             
-            # Map the admin message ID to the group message ID
+            # Map the admin message ID to BOTH group messages 
+            # (use the media message ID as primary for /showme)
             context.bot_data['message_map'][str(admin_msg.message_id)] = {
                 'chat_id': GROUP_ID,
-                'message_id': group_msg.message_id,
+                'message_id': group_media_msg.message_id,  # Use the media message ID
+                'info_message_id': group_msg.message_id,   # Store the info message ID too
                 'sender_id': user_id,
-                'sender_name': user_name
+                'sender_name': user_name,
+                'media_type': media_type
             }
             
             # Send a single small note about /showme once per conversation
@@ -999,20 +1013,20 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     except Exception as e:
         logger.error(f"Failed to relay media: {e}")
-        await update.message.reply_text("Failed to send media. Please try again later.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Failed to send media. Please try again later."
+        )
         return
     
     # Send confirmation that will be deleted
-    confirm_msg = await update.message.reply_text(f"{media_type} sent")
+    confirm_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"{media_type} sent"
+    )
     
     # Delete confirmation after a short delay
     asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
-    
-    # Delete the original message from the user for privacy
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.warning(f"Could not delete user media: {e}")
 
 async def register_bot_commands(application: Application) -> None:
     """Register bot commands with Telegram to show in the command menu."""
