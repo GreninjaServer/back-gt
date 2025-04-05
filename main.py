@@ -915,7 +915,7 @@ def main() -> None:
         fallbacks=[CommandHandler("start", start)],
     )
     application.add_handler(conv_handler)
-    
+
     # Command handlers
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -931,11 +931,17 @@ def main() -> None:
     
     # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay_message))
-    application.add_handler(MessageHandler(
-        filters.PHOTO | filters.DOCUMENT | filters.VIDEO | 
-        filters.VOICE | filters.AUDIO | filters.STICKER, 
-        handle_media
-    ))
+    
+    # Media handlers with correct filter names
+    media_filter = (
+        filters.PHOTO |
+        filters.Document.ALL |
+        filters.VIDEO |
+        filters.VOICE |
+        filters.AUDIO |
+        filters.STICKER
+    )
+    application.add_handler(MessageHandler(media_filter, handle_media))
     
     # Error handler
     application.add_error_handler(error_handler)
