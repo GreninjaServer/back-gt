@@ -86,47 +86,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     
+    # If it's the admin, authenticate immediately
     if user_id == ADMIN_ID:
-        keyboard = [
-            [KeyboardButton("📢 Broadcast"), KeyboardButton("👥 Users")],
-            [KeyboardButton("⚙️ Settings"), KeyboardButton("📊 Stats")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text(
-            f"Welcome back, Admin! You're authenticated with all privileges.",
-            reply_markup=reply_markup
-        )
         bot_data.authenticated_users[user_id] = {
             "name": user_name,
             "timestamp": datetime.now().isoformat(),
             "is_admin": True
         }
         bot_data.save_to_file()
-        return ConversationHandler.END
-    
-    # Check if user is blocked
-    if user_id in bot_data.blocked_users:
         await update.message.reply_text(
-            "Sorry, you've been blocked from using this bot. Please contact the administrator."
+            "Welcome back! You're authenticated as admin. All messages sent to this bot will be stored in your account and backup group."
         )
         return ConversationHandler.END
     
     # Check if already authenticated
     if str(user_id) in bot_data.authenticated_users:
-        keyboard = [
-            [KeyboardButton("📨 Help"), KeyboardButton("📝 Status")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            f"Welcome back, {user_name}! You're already authenticated.",
-            reply_markup=reply_markup
+            "You've already been authenticated. Send any message and it will be forwarded to the admin."
         )
         return ConversationHandler.END
     
-    # Ask security question
+    # Ask for authentication
     question = list(bot_data.security_questions.keys())[0]
     await update.message.reply_text(
-        f"Welcome to the Relay Bot. Please authenticate yourself.\n\n{question}"
+        f"To authenticate, please answer this question:\n\n{question}\n\n"
+        f"Your answer will be deleted immediately for security."
     )
     return AUTHENTICATE
 
@@ -136,29 +120,18 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     user_name = update.effective_user.first_name
     message_text = update.message.text
     
-    # Admin is always authenticated
-    if user_id == ADMIN_ID:
-        bot_data.authenticated_users[user_id] = {
-            "name": user_name,
-            "timestamp": datetime.now().isoformat(),
-            "is_admin": True
-        }
-        bot_data.save_to_file()
-        await update.message.reply_text("You're the admin, always authenticated!")
-        return ConversationHandler.END
-    
-    # Check if user is blocked
-    if user_id in bot_data.blocked_users:
-        await update.message.reply_text(
-            "Sorry, you've been blocked from using this bot. Please contact the administrator."
-        )
-        return ConversationHandler.END
-    
     # Check if the answer matches
     question = list(bot_data.security_questions.keys())[0]
     correct_answer = bot_data.security_questions[question]
     
+    # Delete the authentication message for security
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete authentication message: {e}")
+    
     if message_text.lower() == correct_answer.lower():
+        # Authenticate the user
         bot_data.authenticated_users[user_id] = {
             "name": user_name,
             "timestamp": datetime.now().isoformat(),
@@ -167,26 +140,25 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         }
         bot_data.save_to_file()
         
-        keyboard = [
-            [KeyboardButton("📨 Help"), KeyboardButton("📝 Status")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        
         await update.message.reply_text(
-            "Authentication successful! You can now use the bot.", 
-            reply_markup=reply_markup
+            "Authentication successful! You can now use the bot to send messages to the admin."
         )
         
-        # Notify admin about new user
+        # Notify admin about new authentication
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"New user authenticated: {user_name} (ID: {user_id})"
+            text=f"⚠️ Alert: New user authenticated from account:\n"
+                 f"• Name: {user_name}\n"
+                 f"• ID: {user_id}\n"
+                 f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         
         return ConversationHandler.END
     else:
-        await update.message.reply_text("Authentication failed. Please try again.")
-        return AUTHENTICATE
+        await update.message.reply_text(
+            "Authentication failed. Please try again with /start"
+        )
+        return ConversationHandler.END
 
 async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command to set up the backup group."""
@@ -418,6 +390,121 @@ async def set_security_question(update: Update, context: ContextTypes.DEFAULT_TY
         f"Answer: {answer}"
     )
 
+async def check_authentication(user_id: int, last_activity: str) -> bool:
+    """Check if user's authentication is still valid (not expired after 15 minutes)."""
+    try:
+        # Parse the last activity timestamp
+        last_active = datetime.fromisoformat(last_activity)
+        current_time = datetime.now()
+        
+        # Calculate time difference in minutes
+        time_diff = (current_time - last_active).total_seconds() / 60
+        
+        # If more than 15 minutes have passed, authentication has expired
+        if time_diff > 15:
+            logger.info(f"Authentication expired for user {user_id} after {time_diff:.1f} minutes")
+            return False
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error checking authentication expiration: {e}")
+        return False  # If there's an error, require re-authentication
+
+async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Relay text messages to admin and group."""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Check if message is in private chat
+    if update.effective_chat.type != "private":
+        # Don't relay messages from groups
+        return
+    
+    # If it's the admin, just acknowledge
+    if user_id == ADMIN_ID:
+        # Just acknowledge receipt - no special handling needed
+        keyboard = [
+            [KeyboardButton("📢 Broadcast"), KeyboardButton("👥 Users")],
+            [KeyboardButton("⚙️ Settings"), KeyboardButton("📊 Stats")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text("Message received.", reply_markup=reply_markup)
+        return
+    
+    # Check if user is authenticated
+    if user_id not in bot_data.authenticated_users:
+        keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "You need to authenticate first. Please use /start command.",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Check if authentication has expired (15 minute timeout)
+    user_data = bot_data.authenticated_users.get(str(user_id), {})
+    last_activity = user_data.get("last_activity", "")
+    
+    if not last_activity or not await check_authentication(user_id, last_activity):
+        # Authentication expired
+        if str(user_id) in bot_data.authenticated_users:
+            del bot_data.authenticated_users[str(user_id)]
+            bot_data.save_to_file()
+        
+        keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Your session has expired. Please authenticate again with /start",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Update last activity timestamp
+    if str(user_id) in bot_data.authenticated_users:
+        bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
+        bot_data.save_to_file()
+    
+    # Relay the message to admin
+    message_content = update.message.text
+    forwarded_message = (
+        f"📨 *Message from {user_name}*\n"
+        f"👤 ID: `{user_id}`\n"
+        f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"{message_content}"
+    )
+    
+    # Send to admin with reply markup
+    keyboard = [
+        [InlineKeyboardButton("Reply", callback_data=f"reply_{user_id}")],
+        [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=forwarded_message,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # If group ID is configured, also relay to group
+    if GROUP_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=forwarded_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to relay message to group: {e}")
+    
+    # Simple acknowledgment with keyboard
+    keyboard = [
+        [KeyboardButton("📨 Help"), KeyboardButton("📝 Status")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("✓ Message sent", reply_markup=reply_markup)
+
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle media messages (photos, documents, etc.)"""
     user_id = update.effective_user.id
@@ -428,57 +515,14 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Don't relay media from groups
         return
     
-    # If it's the admin replying with media
-    if user_id == ADMIN_ID and update.message.reply_to_message:
-        try:
-            original_message = update.message.reply_to_message.text
-            match = re.search(r"ID: (\d+)", original_message)
-            if match:
-                target_id = int(match.group(1))
-                caption = "Media from Admin"
-                
-                # Forward the media based on type
-                if update.message.photo:
-                    await context.bot.send_photo(
-                        chat_id=target_id, 
-                        photo=update.message.photo[-1].file_id, 
-                        caption=caption
-                    )
-                elif update.message.document:
-                    await context.bot.send_document(
-                        chat_id=target_id, 
-                        document=update.message.document.file_id, 
-                        caption=caption
-                    )
-                elif update.message.video:
-                    await context.bot.send_video(
-                        chat_id=target_id, 
-                        video=update.message.video.file_id, 
-                        caption=caption
-                    )
-                elif update.message.voice:
-                    await context.bot.send_voice(
-                        chat_id=target_id, 
-                        voice=update.message.voice.file_id, 
-                        caption=caption
-                    )
-                elif update.message.audio:
-                    await context.bot.send_audio(
-                        chat_id=target_id, 
-                        audio=update.message.audio.file_id, 
-                        caption=caption
-                    )
-                
-                await update.message.reply_text("✅ Media sent to user!")
-            else:
-                await update.message.reply_text("Could not determine the original sender.")
-        except Exception as e:
-            await update.message.reply_text(f"Error sending media reply: {e}")
-        return
-    
-    # Check if user is blocked
-    if user_id in bot_data.blocked_users:
-        await update.message.reply_text("You've been blocked from using this bot.")
+    # If it's the admin, just acknowledge
+    if user_id == ADMIN_ID:
+        keyboard = [
+            [KeyboardButton("📢 Broadcast"), KeyboardButton("👥 Users")],
+            [KeyboardButton("⚙️ Settings"), KeyboardButton("📊 Stats")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text("Media received.", reply_markup=reply_markup)
         return
     
     # Check if user is authenticated
@@ -486,7 +530,25 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "You're not authenticated. Please use /start to authenticate.",
+            "You need to authenticate first. Please use /start command.",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Check if authentication has expired (15 minute timeout)
+    user_data = bot_data.authenticated_users.get(str(user_id), {})
+    last_activity = user_data.get("last_activity", "")
+    
+    if not last_activity or not await check_authentication(user_id, last_activity):
+        # Authentication expired
+        if str(user_id) in bot_data.authenticated_users:
+            del bot_data.authenticated_users[str(user_id)]
+            bot_data.save_to_file()
+        
+        keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Your session has expired. Please authenticate again with /start",
             reply_markup=reply_markup
         )
         return
@@ -587,7 +649,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
     except Exception as e:
         logger.error(f"Failed to relay media to admin: {e}")
-        await update.message.reply_text("❌ Failed to relay media. Please try again later.")
+        await update.message.reply_text("Failed to send media. Please try again later.")
         return
     
     # Send to group if configured
@@ -640,14 +702,71 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
         except Exception as e:
             logger.error(f"Failed to relay media to group: {e}")
-            # Notify admin of the failure
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"❌ Failed to send media to group: {e}"
-            )
     
-    # Acknowledge receipt
-    await update.message.reply_text("✅ Media relayed to the admin!")
+    # Simple acknowledgment with keyboard
+    keyboard = [
+        [KeyboardButton("📨 Help"), KeyboardButton("📝 Status")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("✓ Media sent", reply_markup=reply_markup)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button callbacks."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Only admin can interact with these buttons
+    if user_id != ADMIN_ID and query.data != "auth":
+        await query.answer("You're not authorized to use these controls.")
+        return
+    
+    callback_data = query.data
+    
+    # Handle authentication button pressed by non-admin user
+    if callback_data == "auth":
+        await query.answer("Please use /start command to authenticate.")
+        await query.message.reply_text("Please use /start command to begin authentication.")
+        return
+    
+    # Reply to user button
+    if callback_data.startswith("reply_"):
+        try:
+            target_id = int(callback_data.split("_")[1])
+            await query.answer("Please type your reply to this message.")
+            await query.edit_message_reply_markup(reply_markup=None)
+            
+            # Add a note to the message indicating reply mode
+            await query.message.reply_text(
+                f"✏️ *Reply Mode Activated*\n"
+                f"Reply to this message to send a response to user ID: `{target_id}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error setting up reply: {e}")
+            await query.answer(f"Error setting up reply: {e}")
+    
+    # Block user button
+    elif callback_data.startswith("block_"):
+        try:
+            target_id = int(callback_data.split("_")[1])
+            
+            if target_id not in bot_data.blocked_users:
+                bot_data.blocked_users.append(target_id)
+                
+                # Remove from authenticated users if present
+                if str(target_id) in bot_data.authenticated_users:
+                    del bot_data.authenticated_users[str(target_id)]
+                
+                bot_data.save_to_file()
+                
+                await query.answer(f"User {target_id} has been blocked.")
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(f"✅ User {target_id} has been blocked.")
+            else:
+                await query.answer(f"User {target_id} is already blocked.")
+        except Exception as e:
+            logger.error(f"Error blocking user: {e}")
+            await query.answer(f"Error blocking user: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
@@ -712,64 +831,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode=ParseMode.MARKDOWN
         )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    
-    # Only admin can interact with these buttons
-    if user_id != ADMIN_ID:
-        await query.answer("You're not authorized to use these controls.")
-        return
-    
-    callback_data = query.data
-    
-    # Handle authentication button pressed by non-admin user
-    if callback_data == "auth":
-        await query.answer("Please use /start command to authenticate.")
-        await query.message.reply_text("Please use /start command to begin authentication.")
-        return
-    
-    # Reply to user button
-    if callback_data.startswith("reply_"):
-        try:
-            target_id = int(callback_data.split("_")[1])
-            await query.answer("Please type your reply to this message.")
-            await query.edit_message_reply_markup(reply_markup=None)
-            
-            # Add a note to the message indicating reply mode
-            await query.message.reply_text(
-                f"✏️ *Reply Mode Activated*\n"
-                f"Reply to this message to send a response to user ID: `{target_id}`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Error setting up reply: {e}")
-            await query.answer(f"Error setting up reply: {e}")
-    
-    # Block user button
-    elif callback_data.startswith("block_"):
-        try:
-            target_id = int(callback_data.split("_")[1])
-            
-            if target_id not in bot_data.blocked_users:
-                bot_data.blocked_users.append(target_id)
-                
-                # Remove from authenticated users if present
-                if str(target_id) in bot_data.authenticated_users:
-                    del bot_data.authenticated_users[str(target_id)]
-                
-                bot_data.save_to_file()
-                
-                await query.answer(f"User {target_id} has been blocked.")
-                await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_text(f"✅ User {target_id} has been blocked.")
-            else:
-                await query.answer(f"User {target_id} is already blocked.")
-        except Exception as e:
-            logger.error(f"Error blocking user: {e}")
-            await query.answer(f"Error blocking user: {e}")
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by updates."""
     logger.error(f"Update {update} caused error: {context.error}")
@@ -797,110 +858,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             logger.error(f"Failed to send error notification: {e}")
 
-async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Relay text messages to admin and group."""
-    user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
-    
-    # Check if message is in private chat
-    if update.effective_chat.type != "private":
-        # Don't relay messages from groups unless it's a setup command
-        return
-    
-    # If it's the admin sending to the bot directly
-    if user_id == ADMIN_ID:
-        # Check if replying to a forwarded message
-        if update.message.reply_to_message:
-            # Try to extract the original sender's ID from the forwarded message
-            try:
-                original_message = update.message.reply_to_message.text
-                match = re.search(r"ID: (\d+)", original_message)
-                if match:
-                    target_id = int(match.group(1))
-                    reply_text = update.message.text
-                    
-                    # Send the admin's reply to the original sender
-                    try:
-                        await context.bot.send_message(
-                            chat_id=target_id,
-                            text=f"*Reply from Admin:*\n\n{reply_text}",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                        await update.message.reply_text("✅ Reply sent to user!")
-                    except Exception as e:
-                        logger.error(f"Failed to send reply: {e}")
-                        await update.message.reply_text(f"❌ Failed to send reply: {e}")
-                else:
-                    await update.message.reply_text("Could not determine the original sender.")
-            except Exception as e:
-                await update.message.reply_text(f"Error processing reply: {e}")
-        else:
-            # Regular message from admin, just acknowledge
-            await update.message.reply_text("Message received!")
-        return
-    
-    # Check if user is blocked
-    if user_id in bot_data.blocked_users:
-        await update.message.reply_text("You've been blocked from using this bot.")
-        return
-    
-    # Check if user is authenticated
-    if user_id not in bot_data.authenticated_users:
-        keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "You're not authenticated. Please use /start to authenticate.",
-            reply_markup=reply_markup
-        )
-        return
-    
-    # Update last activity timestamp
-    if str(user_id) in bot_data.authenticated_users:
-        bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
-        bot_data.save_to_file()
-    
-    # Relay the message to admin
-    message_content = update.message.text
-    forwarded_message = (
-        f"📨 *Message from {user_name}*\n"
-        f"👤 ID: `{user_id}`\n"
-        f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"{message_content}"
-    )
-    
-    # Send to admin with reply markup
-    keyboard = [
-        [InlineKeyboardButton("Reply", callback_data=f"reply_{user_id}")],
-        [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=forwarded_message,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    # If group ID is configured, also relay to group
-    if GROUP_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=GROUP_ID,
-                text=forwarded_message,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Failed to relay message to group: {e}")
-            # Notify admin of the failure
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"❌ Failed to send message to group: {e}"
-            )
-    
-    # Acknowledge receipt
-    await update.message.reply_text("✅ Message relayed to the admin!")
-
 def main() -> None:
     """Start the bot."""
     # Create the Application
@@ -915,7 +872,7 @@ def main() -> None:
         fallbacks=[CommandHandler("start", start)],
     )
     application.add_handler(conv_handler)
-
+    
     # Command handlers
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
