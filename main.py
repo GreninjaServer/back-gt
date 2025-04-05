@@ -932,14 +932,14 @@ def main() -> None:
     # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay_message))
     
-    # Media handlers with correct filter names
+    # Media handlers with correct class-based filters
     media_filter = (
-        filters.PHOTO |
+        filters.Photo.ALL |
         filters.Document.ALL |
-        filters.VIDEO |
-        filters.VOICE |
-        filters.AUDIO |
-        filters.STICKER
+        filters.Video.ALL |
+        filters.Voice.ALL |
+        filters.Audio.ALL |
+        filters.Sticker.ALL
     )
     application.add_handler(MessageHandler(media_filter, handle_media))
     
