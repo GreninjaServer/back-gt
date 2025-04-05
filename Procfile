@@ -1,1 +1,1 @@
-web: python main.py 
+web: python -c "import re; data = open('main.py').read(); data = re.sub(r'try:\s+with', 'try:\n        with', data); open('main.py', 'w').write(data)" && python main.py 

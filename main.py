@@ -96,14 +96,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "is_admin": True
         }
         bot_data.save_to_file()
-        keyboard = [
-            [KeyboardButton("📢 Broadcast"), KeyboardButton("👥 Users")],
-            [KeyboardButton("⚙️ Settings"), KeyboardButton("📊 Stats")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
-            "Welcome back! You're authenticated as admin.",
-            reply_markup=reply_markup
+            "Welcome back! You're authenticated as admin."
         )
         return ConversationHandler.END
     
@@ -118,13 +112,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             bot_data.authenticated_users[str(user_id)]["last_activity"] = datetime.now().isoformat()
             bot_data.save_to_file()
             
-            keyboard = [
-                [KeyboardButton("📨 Help"), KeyboardButton("📝 Status")]
-            ]
-            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             await update.message.reply_text(
-                "You're already authenticated. Session refreshed.",
-                reply_markup=reply_markup
+                "You're already authenticated. Session refreshed."
             )
             return ConversationHandler.END
         else:
@@ -188,14 +177,8 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         }
         bot_data.save_to_file()
         
-        keyboard = [
-            [KeyboardButton("📨 Help"), KeyboardButton("📝 Status")]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        
         success_msg = await update.message.reply_text(
-            "Authentication successful! You can now use the bot to send messages to the admin.",
-            reply_markup=reply_markup
+            "Authentication successful! You can now use the bot to send messages to the admin."
         )
         
         # Notify admin about new authentication with terminate button
@@ -241,27 +224,27 @@ async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     # Save to .env file
     try:
-    with open(".env", "r") as file:
-        env_lines = file.readlines()
-    
-    # Check if GROUP_ID already exists in the file
-    group_id_exists = False
-    for i, line in enumerate(env_lines):
-        if line.startswith("GROUP_ID="):
-            env_lines[i] = f"GROUP_ID={GROUP_ID}\n"
-            group_id_exists = True
-            break
-    
-    # If GROUP_ID doesn't exist, add it
-    if not group_id_exists:
-        env_lines.append(f"GROUP_ID={GROUP_ID}\n")
-    
-    # Write back to the file
-    with open(".env", "w") as file:
-        file.writelines(env_lines)
-    
+        with open(".env", "r") as file:
+            env_lines = file.readlines()
+        
+        # Check if GROUP_ID already exists in the file
+        group_id_exists = False
+        for i, line in enumerate(env_lines):
+            if line.startswith("GROUP_ID="):
+                env_lines[i] = f"GROUP_ID={GROUP_ID}\n"
+                group_id_exists = True
+                break
+        
+        # If GROUP_ID doesn't exist, add it
+        if not group_id_exists:
+            env_lines.append(f"GROUP_ID={GROUP_ID}\n")
+        
+        # Write back to the file
+        with open(".env", "w") as file:
+            file.writelines(env_lines)
+        
         await update.message.reply_text(f"✅ Backup group has been set up with ID: {GROUP_ID}")
-    await update.message.reply_text("This group will now receive all messages sent to the bot.")
+        await update.message.reply_text("This group will now receive all messages sent to the bot.")
     except Exception as e:
         logger.error(f"Error updating .env file: {e}")
         await update.message.reply_text(f"⚠️ Error saving group ID to .env file: {e}")
@@ -511,22 +494,12 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await update.message.reply_text(f"Error processing reply: {e}")
         else:
             # Regular message from admin, just acknowledge
-            keyboard = [
-                [KeyboardButton("📢 Broadcast"), KeyboardButton("👥 Users")],
-                [KeyboardButton("⚙️ Settings"), KeyboardButton("📊 Stats")]
-            ]
-            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            await update.message.reply_text("Message received.", reply_markup=reply_markup)
+            await update.message.reply_text("Message received.")
         return
     
     # Check if user is authenticated
     if user_id not in bot_data.authenticated_users:
-        keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "You need to authenticate first. Please use /start command.",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text("You need to authenticate first. Please use /start command.")
         return
     
     # Check if authentication has expired (15 minute timeout)
@@ -539,12 +512,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             del bot_data.authenticated_users[str(user_id)]
             bot_data.save_to_file()
         
-        keyboard = [[InlineKeyboardButton("Authenticate", callback_data="auth")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "Your session has expired. Please authenticate again with /start",
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text("Your session has expired. Please authenticate again with /start")
         return
     
     # Update last activity timestamp
