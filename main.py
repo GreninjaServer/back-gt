@@ -338,12 +338,64 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         text=f"Authentication successful! You have a {session_type} session that expires in {int(session_timeout.total_seconds()/60)} minutes."
     )
     
-    # Send a simple confirmation to the user
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"✅ You're now authenticated for a {session_type} session.\n"
-             f"Session will expire after {int(session_timeout.total_seconds()/60)} minutes of inactivity."
-    )
+    # Send a simple confirmation to the user with live timer
+    session_minutes = int(session_timeout.total_seconds() / 60)
+    
+    # For extended sessions (24h+), schedule chat clearing after the session ends
+    if session_type == "extended":
+        try:
+            # Schedule chat history clearing after the session expires
+            # We'll provide a small buffer (5 minutes) after the session expires
+            clear_delay = int(session_timeout.total_seconds()) + 300  # Session timeout + 5 minutes
+            await schedule_chat_clear(context, user_id, clear_delay)
+            
+            # Send timer message
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ You're now authenticated for a {session_type} session.\n"
+                     f"Your session will expire in {session_minutes} minutes "
+                     f"({session_minutes // 60} hours) of inactivity.\n\n"
+                     f"📝 *Note:* Chat history will be cleared after your session expires."
+            )
+            
+            # For extended sessions, start a countdown timer using a live location
+            # This is a creative workaround to show a timer in Telegram
+            try:
+                # Calculate expiration time (current time + session duration)
+                expiry_time = datetime.now() + timedelta(seconds=session_timeout.total_seconds())
+                
+                # Send a message with the expiration time
+                timer_msg = await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⏱️ *Session Timer*\n"
+                         f"Your session will expire at: {expiry_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                         f"Remaining: {session_minutes} minutes",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                # Pin this message so it's always visible
+                try:
+                    await context.bot.pin_chat_message(
+                        chat_id=user_id,
+                        message_id=timer_msg.message_id,
+                        disable_notification=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not pin timer message: {e}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to create session timer: {e}")
+        except Exception as e:
+            logger.error(f"Failed to schedule chat clearing for extended session: {e}")
+    else:
+        # For standard sessions, just send a normal confirmation
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ You're now authenticated for a {session_type} session.\n"
+                 f"Session will expire after {session_minutes} minutes of inactivity.\n\n"
+                 f"📝 *Note:* Chat history will be cleared when your session expires.",
+            parse_mode=ParseMode.MARKDOWN
+        )
     
     return ConversationHandler.END
 
@@ -625,13 +677,16 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             auth_error = await update.message.reply_text(
                 "Your session has expired. Please authenticate again with /start"
             )
-            # Auto-delete the error message after 10 seconds
+            # Auto-delete after 10 seconds
             asyncio.create_task(delete_message_after_delay(auth_error, 10))
+            
+            # Clear chat history after session expiry
+            await clear_chat_history(context, user_id)
         else:
             auth_required = await update.message.reply_text(
                 "You need to authenticate first. Please use /start command."
             )
-            # Auto-delete the error message after 10 seconds
+            # Auto-delete after 10 seconds
             asyncio.create_task(delete_message_after_delay(auth_required, 10))
         return
     
@@ -835,7 +890,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• User blocking capabilities\n\n"
             "Use /cmd to see all available commands."
         )
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        help_msg = await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        # Schedule deletion of help message after 13 seconds
+        asyncio.create_task(delete_message_after_delay(help_msg, 13))
     else:
         help_text = (
             "*🤖 GT-UP Bot - Help*\n\n"
@@ -848,9 +905,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• Your session expires after 15 minutes of inactivity\n"
             "• Use /status to check your authentication status"
         )
-         # Schedule deletion of help message
-        asyncio.create_task(delete_message_after_delay(error_msg, 13))
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        help_msg = await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        # Schedule deletion of help message after 13 seconds
+        asyncio.create_task(delete_message_after_delay(help_msg, 13))
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
@@ -939,12 +996,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_text(f"✅ Session for user {target_id} has been terminated.")
                 
-                # Notify the user
+                # Notify the user and clear chat history
                 try:
-                    await context.bot.send_message(
+                    # Send termination notification
+                    term_msg = await context.bot.send_message(
                         chat_id=target_id,
-                        text="Your session has been terminated by the admin. Please authenticate again if needed."
+                        text="Your session has been terminated by the admin. Chat history will be cleared."
                     )
+                    
+                    # Clear chat history
+                    await clear_chat_history(context, target_id)
+                    
                 except Exception as e:
                     logger.error(f"Could not notify user about session termination: {e}")
             else:
@@ -1084,6 +1146,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             # Auto-delete after 10 seconds
             asyncio.create_task(delete_message_after_delay(auth_error, 10))
+            
+            # Clear chat history after session expiry
+            await clear_chat_history(context, user_id)
         else:
             auth_required = await update.message.reply_text(
                 "You need to authenticate first. Please use /start command."
@@ -1392,6 +1457,50 @@ async def clearall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
+
+async def clear_chat_history(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    """Clear chat history by sending a special service message."""
+    try:
+        # Use Telegram's deleteHistory method to clear chat history
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Session ended. Clearing chat history..."
+        )
+        
+        # Use the Telegram API to delete chat history
+        # This requires the appropriate bot permissions
+        await context.bot.delete_chat_history(chat_id=user_id)
+        
+        # Send a notification that will self-destruct
+        clear_msg = await context.bot.send_message(
+            chat_id=user_id,
+            text="Chat history has been cleared. Please authenticate again with /start if needed."
+        )
+        
+        # Auto-delete the notification after 10 seconds
+        asyncio.create_task(delete_message_after_delay(clear_msg, 10))
+        
+        logger.info(f"Cleared chat history for user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to clear chat history for user {user_id}: {e}")
+
+async def schedule_chat_clear(context: ContextTypes.DEFAULT_TYPE, user_id: int, delay_seconds: int) -> None:
+    """Schedule clearing chat history after the specified delay."""
+    # Schedule the chat history clear
+    context.application.create_task(
+        wait_and_clear_chat(context, user_id, delay_seconds)
+    )
+    
+    logger.info(f"Scheduled chat history clear for user {user_id} in {delay_seconds} seconds")
+
+async def wait_and_clear_chat(context: ContextTypes.DEFAULT_TYPE, user_id: int, delay_seconds: int) -> None:
+    """Wait for the specified delay and then clear chat history."""
+    await asyncio.sleep(delay_seconds)
+    
+    # Check if the user is still authenticated before clearing
+    if not bot_data.is_session_valid(user_id):
+        await clear_chat_history(context, user_id)
+    # Otherwise, the session is still valid, so don't clear yet
 
 def main() -> None:
     """Start the bot."""
