@@ -35,8 +35,8 @@ PORT = int(os.getenv("PORT", "8443"))
 RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL")
 
 # Session management settings
-SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "15"))  # Minutes for normal session
-EXTENDED_SESSION_TIMEOUT = int(os.getenv("EXTENDED_SESSION_TIMEOUT", "1440"))  # Minutes for extended session (24 hours default)
+SESSION_TIMEOUT = timedelta(minutes=int(os.getenv("SESSION_TIMEOUT", "15")))  # Normal session timeout (15 min default)
+EXTENDED_SESSION_TIMEOUT = timedelta(minutes=int(os.getenv("EXTENDED_SESSION_TIMEOUT", "1440")))  # Extended session timeout (24 hours default)
 
 # Data storage
 DATA_FILE = "bot_data.json"
@@ -64,6 +64,7 @@ class BotData:
             "What's your secret phrase?": "277353"  # Set to the provided secret answer
         }
         self.last_backup = datetime.now()
+        self.start_time = datetime.now()  # Initialize start time for uptime calculation
         
     def save_to_file(self):
         """Save bot data to file"""
@@ -148,9 +149,9 @@ class BotData:
             
             # Get the appropriate timeout based on session type
             if session_type == "extended":
-                timeout_minutes = EXTENDED_SESSION_TIMEOUT
+                timeout_minutes = EXTENDED_SESSION_TIMEOUT.total_seconds() / 60
             else:
-                timeout_minutes = SESSION_TIMEOUT
+                timeout_minutes = SESSION_TIMEOUT.total_seconds() / 60
                 
             # Check if expired
             time_diff = (current_time - last_active).total_seconds() / 60
@@ -305,7 +306,7 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     }
     bot_data.save_to_file()
     
-    # Send detailed authentication notification ONLY to backup group
+    # Send detailed authentication notification ONLY to backup group with action buttons
     if GROUP_ID:
         try:
             auth_message = (
@@ -315,9 +316,18 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"📝 Session: {session_type.capitalize()} ({int(session_timeout.total_seconds()/60)} min)"
             )
+            
+            # Create action buttons for the admin to manage this user
+            keyboard = [
+                [InlineKeyboardButton("Terminate Session", callback_data=f"terminate_{user_id}")],
+                [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=auth_message,
+                reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
@@ -647,17 +657,26 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Log the message metadata in the group if configured
     if GROUP_ID:
         try:
-            # Send detailed message to group
+            # Send detailed message to group with action buttons
             group_message = (
                 f"📨 *Message from {user_name}*\n"
                 f"👤 ID: `{user_id}`\n"
                 f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"{message_content}"
             )
+            
+            # Create action buttons for admin
+            keyboard = [
+                [InlineKeyboardButton("Reply to User", callback_data=f"reply_{user_id}")],
+                [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             group_msg = await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=group_message,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
             )
             
             # Store message mapping for /showme command
@@ -669,7 +688,8 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 'chat_id': GROUP_ID,
                 'message_id': group_msg.message_id,
                 'sender_id': user_id,
-                'sender_name': user_name
+                'sender_name': user_name,
+                'media_type': "Message"
             }
             
             # Send a single small note about /showme once per conversation
@@ -681,7 +701,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 context.user_data['showme_info_sent'] = True
                 # Delete this info after 10 seconds
                 asyncio.create_task(delete_message_after_delay(info_msg, 10))
-            
+                
         except Exception as e:
             logger.error(f"Failed to relay message to group: {e}")
     
@@ -719,6 +739,9 @@ async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         group_info = message_map[str(msg_id)]
         group_id = group_info['chat_id']
         group_msg_id = group_info['message_id']
+        sender_id = group_info.get('sender_id', 'Unknown')
+        sender_name = group_info.get('sender_name', 'Unknown')
+        media_type = group_info.get('media_type', 'Message')
         
         # Remove the -100 prefix for the URL
         if str(group_id).startswith('-100'):
@@ -729,19 +752,20 @@ async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Create the message link
         message_link = f"https://t.me/c/{clean_group_id}/{group_msg_id}"
         
-        # Create clickable button to view the message
-        keyboard = [[InlineKeyboardButton("View Message Details", url=message_link)]]
+        # Create buttons for various actions
+        keyboard = [
+            [InlineKeyboardButton("View Message Details", url=message_link)],
+            [InlineKeyboardButton("Reply to User", callback_data=f"reply_{sender_id}")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Get sender info if available
-        sender_name = group_info.get('sender_name', 'Unknown')
-        sender_id = group_info.get('sender_id', 'Unknown')
         
         await update.message.reply_text(
             f"*Message Info:*\n"
             f"• From: {sender_name}\n"
-            f"• ID: `{sender_id}`\n\n"
-            f"Click the button below to view full details in the backup group:",
+            f"• ID: `{sender_id}`\n"
+            f"• Type: {media_type}\n"
+            f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"Click the buttons below for actions:",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -958,6 +982,48 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             logger.error(f"Error generating message link: {e}")
             await query.answer(f"Error generating message link")
+    
+    # Handle clearall confirmation
+    elif callback_data == "confirm_clearall":
+        try:
+            # Keep only the admin in authenticated users
+            to_keep = {}
+            if str(ADMIN_ID) in bot_data.authenticated_users:
+                to_keep[str(ADMIN_ID)] = bot_data.authenticated_users[str(ADMIN_ID)]
+            
+            # Count how many users were removed
+            removed_count = len(bot_data.authenticated_users) - len(to_keep)
+            
+            # Update the authenticated users
+            bot_data.authenticated_users = to_keep
+            bot_data.save_to_file()
+            
+            await query.answer("All users have been cleared.")
+            await query.edit_message_text(
+                f"✅ Successfully removed {removed_count} authenticated users.\n"
+                f"Only the admin remains authenticated.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Log to backup group
+            if GROUP_ID:
+                try:
+                    await context.bot.send_message(
+                        chat_id=GROUP_ID,
+                        text=f"⚠️ *ADMIN ACTION*: Cleared {removed_count} authenticated users",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send clearall log to backup group: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error clearing users: {e}")
+            await query.answer(f"Error clearing users: {e}")
+    
+    # Handle clearall cancellation
+    elif callback_data == "cancel_clearall":
+        await query.answer("Operation cancelled.")
+        await query.edit_message_text("❌ Clear all operation cancelled.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log errors caused by updates."""
@@ -1115,7 +1181,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 # Forward unknown media types directly
                 group_media_msg = await original_message.forward(chat_id=GROUP_ID)
             
-            # Then send the info message
+            # Then send the info message with action buttons
             group_info = (
                 f"📨 *{media_type} from {user_name}*\n"
                 f"👤 ID: `{user_id}`\n"
@@ -1124,10 +1190,18 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if caption:
                 group_info += f"\n\n*Caption:* {caption}"
             
+            # Create action buttons for admin
+            keyboard = [
+                [InlineKeyboardButton("Reply to User", callback_data=f"reply_{user_id}")],
+                [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             group_msg = await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=group_info,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
             )
             
             # Store message mapping for /showme command
@@ -1193,7 +1267,8 @@ async def register_bot_commands(application: Application) -> None:
         ("unblock", "Unblock a previously blocked user"),
         ("users", "List all authenticated users"),
         ("setquestion", "Set security question and answer"),
-        ("showme", "See full message details when replying")
+        ("showme", "See full message details when replying"),
+        ("clearall", "Clear all authenticated users")
     ]
     
     # Set commands for regular users (visible in private chats)
@@ -1294,6 +1369,28 @@ async def delete_message_after_delay(message, delay_seconds):
         if "message to delete not found" not in str(e).lower():
             logger.warning(f"Could not delete message: {e}")
 
+async def clearall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all authenticated users except the admin."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can clear all authenticated users.")
+        return
+    
+    # Ask for confirmation
+    keyboard = [
+        [InlineKeyboardButton("Yes, clear all users", callback_data="confirm_clearall")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel_clearall")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "⚠️ *WARNING*: This will remove all authenticated users except you.\n"
+        "Are you sure you want to continue?",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 def main() -> None:
     """Start the bot."""
     # Create the Application
@@ -1321,6 +1418,7 @@ def main() -> None:
     application.add_handler(CommandHandler("users", list_users))
     application.add_handler(CommandHandler("setquestion", set_security_question))
     application.add_handler(CommandHandler("showme", showme_command))
+    application.add_handler(CommandHandler("clearall", clearall_command))
     
     # Button callback handler
     application.add_handler(CallbackQueryHandler(button_callback))
