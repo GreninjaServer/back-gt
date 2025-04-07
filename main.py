@@ -175,60 +175,45 @@ bot_data = BotData()
 bot_data.load_from_file()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Send a welcome message when the command /start is issued."""
+    """Send a message when the command /start is issued."""
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     
-    # Check if user is blocked
-    if user_id in bot_data.blocked_users:
-        await update.message.reply_text(
-            "You have been blocked from using this bot."
-        )
-        return ConversationHandler.END
-    
-    # If it's the admin, authenticate immediately with extended session
+    # If it's admin, don't need to authenticate
     if user_id == ADMIN_ID:
-        bot_data.authenticated_users[str(user_id)] = {
-            "name": user_name,
-            "timestamp": datetime.now().isoformat(),
-            "last_activity": datetime.now().isoformat(),
-            "is_admin": True,
-            "session_type": "extended"
-        }
-        bot_data.save_to_file()
         await update.message.reply_text(
-            "Welcome back! You're authenticated as admin with an extended session."
+            f"Hello Admin! You are already authenticated.\n"
+            f"Your status is always active."
         )
         return ConversationHandler.END
     
-    # Check if already authenticated with valid session
-    if str(user_id) in bot_data.authenticated_users and bot_data.is_session_valid(user_id):
-        # Update the last activity timestamp
-        bot_data.update_activity(user_id)
-        
-        # Get session type and calculate remaining time
-        user_data = bot_data.authenticated_users[str(user_id)]
-        session_type = user_data.get("session_type", "standard")
-        last_activity = datetime.fromisoformat(user_data.get("last_activity", datetime.now().isoformat()))
-        
-        # Calculate remaining minutes based on session type
-        timeout = EXTENDED_SESSION_TIMEOUT if session_type == "extended" else SESSION_TIMEOUT
-        remaining_mins = timeout - int((datetime.now() - last_activity).total_seconds() / 60)
+    # Check if user is already authenticated with a valid session
+    if bot_data.is_session_valid(user_id):
+        session_info = bot_data.authenticated_users[str(user_id)]
+        session_type = session_info.get("session_type", "standard")
+        timeout_seconds = session_info.get("session_timeout", SESSION_TIMEOUT.total_seconds())
+        minutes_remaining = int(timeout_seconds / 60)
         
         await update.message.reply_text(
-            f"You're already authenticated, {user_name}! Session refreshed.\n"
-            f"Session type: {session_type.capitalize()}\n"
-            f"Timeout: {remaining_mins} minutes"
+            f"Hello {user_name}!\n\n"
+            f"You are already authenticated with a {session_type} session.\n"
+            f"Session timeout: {minutes_remaining} minutes of inactivity."
         )
         return ConversationHandler.END
     
-    # Ask for authentication
-    question = list(bot_data.security_questions.keys())[0]
-    # Store the message_id in context to verify the reply
-    context.user_data['auth_message_id'] = (await update.message.reply_text(
-        f"To authenticate, please answer this question:\n\n{question}\n\n"
-        f"Your answer will be deleted immediately for security."
-    )).message_id
+    # User needs to authenticate
+    # Choose a random security question
+    questions = list(bot_data.security_questions.keys())
+    question = questions[0]  # Since we only have one question for simplicity
+    
+    # Send the question and store its message_id for validation in authenticate handler
+    auth_message = await update.message.reply_text(
+        f"Please answer the following security question to authenticate:\n\n"
+        f"{question}"
+    )
+    
+    # Store the message ID for the authentication handler to verify replies
+    context.user_data['auth_message_id'] = auth_message.message_id
     
     return AWAITING_AUTH_REPLY
 
@@ -296,57 +281,71 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
 
 async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle session type selection"""
+    """Handle session type selection."""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
     query = update.callback_query
-    user_id = query.from_user.id
-    user_name = query.from_user.first_name
-    choice = query.data
-    
     await query.answer()
     
-    if choice == "session_standard":
-        session_type = "standard"
-        timeout = f"{SESSION_TIMEOUT} minutes"
-    elif choice == "session_extended":
+    # Check which session type was selected
+    session_type = "standard"
+    session_timeout = SESSION_TIMEOUT
+    if "extended" in query.data:
         session_type = "extended"
-        timeout = f"{EXTENDED_SESSION_TIMEOUT} minutes ({EXTENDED_SESSION_TIMEOUT//60} hours)"
-    else:
-        await query.edit_message_text("Invalid selection. Please try again with /start")
-        return ConversationHandler.END
+        session_timeout = EXTENDED_SESSION_TIMEOUT
     
-    # Authenticate the user
+    # Authenticate the user with the appropriate session timeout
+    current_time = datetime.now().isoformat()
     bot_data.authenticated_users[str(user_id)] = {
         "name": user_name,
-        "timestamp": datetime.now().isoformat(),
-        "last_activity": datetime.now().isoformat(),
-        "is_admin": False,
-        "session_type": session_type
+        "authenticated_at": current_time,
+        "last_activity": current_time,
+        "session_type": session_type,
+        "session_timeout": session_timeout.total_seconds()
     }
     bot_data.save_to_file()
     
+    # Prepare authentication notification message
+    auth_message = (
+        f"🔐 *New Authentication*\n"
+        f"👤 User: {user_name}\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"📝 Session: {session_type.capitalize()} ({int(session_timeout.total_seconds()/60)} min)"
+    )
+    
+    # Send authentication notification to backup group (not to admin's bot chat)
+    if GROUP_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=auth_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to send authentication notification to group: {e}")
+    
+    # Remove the keyboard
     await query.edit_message_text(
-        f"Authentication successful! You can now use the bot.\n\n"
-        f"Session type: {session_type.capitalize()}\n"
-        f"Session timeout: {timeout}"
+        text=f"Authentication successful! You have a {session_type} session that expires in {int(session_timeout.total_seconds()/60)} minutes."
     )
     
-    # Notify admin about new authentication
-    keyboard = [
-        [InlineKeyboardButton("Terminate Session", callback_data=f"terminate_{user_id}")],
-        [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+    # Send message to user about authentication success
     await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"⚠️ *Alert: New user authenticated*\n"
-             f"• Name: {user_name}\n"
-             f"• ID: `{user_id}`\n"
-             f"• Session Type: {session_type.capitalize()}\n"
-             f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+        chat_id=user_id,
+        text=f"✅ You're now authenticated for a {session_type} session.\n"
+             f"Session will expire after {int(session_timeout.total_seconds()/60)} minutes of inactivity."
     )
+    
+    # Notify the admin via a private message (not in the bot chat)
+    try:
+        admin_notification = f"📱 User {user_name} (ID: {user_id}) authenticated with {session_type} session."
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=admin_notification
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify admin about authentication: {e}")
     
     return ConversationHandler.END
 
@@ -613,7 +612,9 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # If it's the admin, just acknowledge
     if user_id == ADMIN_ID:
         # Just acknowledge, no reply functionality needed
-        await update.message.reply_text("Message received.")
+        admin_msg = await update.message.reply_text("Message received.")
+        # Auto-delete the confirmation after 5 seconds
+        asyncio.create_task(delete_message_after_delay(admin_msg, 5))
         return
     
     # Check if user is authenticated and session is valid
@@ -623,13 +624,17 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # Session expired, remove from authenticated users
             del bot_data.authenticated_users[str(user_id)]
             bot_data.save_to_file()
-            await update.message.reply_text(
+            auth_error = await update.message.reply_text(
                 "Your session has expired. Please authenticate again with /start"
             )
+            # Auto-delete the error message after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_error, 10))
         else:
-            await update.message.reply_text(
+            auth_required = await update.message.reply_text(
                 "You need to authenticate first. Please use /start command."
             )
+            # Auto-delete the error message after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_required, 10))
         return
     
     # Update last activity timestamp for valid sessions
@@ -758,42 +763,50 @@ async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display available commands"""
+    """Show available commands."""
     user_id = update.effective_user.id
     
+    # Check if user is authenticated
+    if not bot_data.is_session_valid(user_id) and user_id != ADMIN_ID:
+        not_auth_msg = await update.message.reply_text(
+            "❌ You are not authenticated. Please use /start to authenticate."
+        )
+        # Auto-delete the message after 15 seconds
+        asyncio.create_task(delete_message_after_delay(not_auth_msg, 15))
+        return
+    
+    # Update last activity for authenticated users
+    if str(user_id) in bot_data.authenticated_users:
+        bot_data.update_activity(user_id)
+    
+    # Build command list
     if user_id == ADMIN_ID:
-        commands_text = (
-            "*Available Commands:*\n\n"
-            "*Basic Commands:*\n"
+        commands = (
+            "*Available Commands*\n\n"
+            "General commands:\n"
             "/start - Start the bot and authenticate\n"
+            "/status - Show bot status\n"
             "/help - Show help message\n"
-            "/status - Check system status\n"
             "/cmd - Show this command list\n\n"
             
-            "*Admin Commands:*\n"
-            "/setupgroup - Set current group as backup group\n"
-            "/broadcast [message] - Send message to all users\n"
-            "/block [user_id] - Block a user\n"
-            "/unblock [user_id] - Unblock a user\n"
-            "/users - List all authenticated users\n"
-            "/setquestion [question|answer] - Set security question\n"
-            "/showme - Reply to a message to see its backup version\n\n"
-            
-            "*Message Controls:*\n"
-            "• Reply to any message to send a response to that user\n"
-            "• Use inline buttons for quick actions\n"
-            "• Session validity: 15 minutes"
+            "Admin commands:\n"
+            "/broadcast - Send message to all authenticated users\n"
+            "/clearall - Clear all authenticated users\n"
+            "/showme - Show message details in backup group"
         )
     else:
-        commands_text = (
-            "*Available Commands:*\n\n"
+        commands = (
+            "*Available Commands*\n\n"
             "/start - Start the bot and authenticate\n"
-            "/status - Check your authentication status\n\n"
-            
-            "Just send a message to relay it to the admin."
+            "/status - Check your authentication status\n"
+            "/help - Show help message\n"
+            "/cmd - Show this command list"
         )
     
-    await update.message.reply_text(commands_text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        commands,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
@@ -998,7 +1011,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # If it's the admin, just acknowledge
     if user_id == ADMIN_ID:
         # Just acknowledge
-        await update.message.reply_text("Media received.")
+        admin_msg = await update.message.reply_text("Media received.")
+        # Auto-delete confirmation after 5 seconds
+        asyncio.create_task(delete_message_after_delay(admin_msg, 5))
         return
     
     # Check if user is authenticated and session is valid
@@ -1008,13 +1023,17 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # Session expired, remove from authenticated users
             del bot_data.authenticated_users[str(user_id)]
             bot_data.save_to_file()
-            await update.message.reply_text(
+            auth_error = await update.message.reply_text(
                 "Your session has expired. Please authenticate again with /start"
             )
+            # Auto-delete after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_error, 10))
         else:
-            await update.message.reply_text(
+            auth_required = await update.message.reply_text(
                 "You need to authenticate first. Please use /start command."
             )
+            # Auto-delete after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_required, 10))
         return
     
     # Update last activity timestamp for valid sessions
@@ -1205,102 +1224,77 @@ async def register_bot_commands(application: Application) -> None:
     logger.info("Bot commands registered")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check system status or user authentication status."""
+    """Show bot status information."""
     user_id = update.effective_user.id
     
+    # Calculate uptime
+    uptime = datetime.now() - bot_data.start_time
+    days, remainder = divmod(uptime.total_seconds(), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m {int(seconds)}s"
+    
+    # Count active sessions
+    active_sessions = 0
+    for user_id_str, user_data in bot_data.authenticated_users.items():
+        if bot_data.is_session_valid(int(user_id_str)):
+            active_sessions += 1
+    
+    # Count backups
+    backup_count = 0
+    if os.path.exists(BACKUP_DIR):
+        backup_count = len([f for f in os.listdir(BACKUP_DIR) if f.startswith("bot_data_") and f.endswith(".json")])
+    
+    # If user is admin, show detailed status
     if user_id == ADMIN_ID:
-        # Admin gets system status
-        num_authenticated = len(bot_data.authenticated_users)
-        num_blocked = len(bot_data.blocked_users)
-        
-        # Count active vs expired sessions
-        active_sessions = 0
-        for user_id_str, user_data in bot_data.authenticated_users.items():
-            if bot_data.is_session_valid(int(user_id_str)):
-                active_sessions += 1
-        
-        # Format uptime - with Windows compatibility
-        try:
-            # Try Linux-style uptime
-            with open('/proc/uptime', 'r') as f:
-                uptime_seconds = float(f.readline().split()[0])
-                uptime_str = str(timedelta(seconds=uptime_seconds)).split('.')[0]
-        except FileNotFoundError:
-            # Fall back to a different method for Windows
-            try:
-                if HAS_PSUTIL:
-                    uptime_seconds = time.time() - psutil.boot_time()
-                    uptime_str = str(timedelta(seconds=int(uptime_seconds))).split('.')[0]
-                else:
-                    uptime_str = "Unknown (psutil not installed)"
-            except:
-                uptime_str = "Unknown"
-        except:
-            uptime_str = "Unknown"
-            
-        # Count backups
-        try:
-            backup_count = len([f for f in os.listdir(BACKUP_DIR) if f.startswith("bot_data_backup_")])
-        except:
-            backup_count = 0
-            
-        # Get bot version info
-        version_info = "1.1.0"  # Updated version with improved session handling
-        
-        status_text = (
-            "*System Status:*\n"
-            f"• Authenticated users: {num_authenticated} (active: {active_sessions})\n"
-            f"• Blocked users: {num_blocked}\n"
-            f"• System uptime: {uptime_str}\n"
-            f"• Data backups: {backup_count}\n"
-            f"• Bot version: {version_info}\n"
-            f"• Bot status: Running ✅\n\n"
-            f"*Session Settings:*\n"
-            f"• Standard timeout: {SESSION_TIMEOUT} minutes\n"
-            f"• Extended timeout: {EXTENDED_SESSION_TIMEOUT} minutes ({EXTENDED_SESSION_TIMEOUT//60} hours)"
+        status_message = (
+            f"*Bot Status*\n\n"
+            f"🕒 Uptime: {uptime_str}\n"
+            f"👥 Authenticated users: {len(bot_data.authenticated_users)}\n"
+            f"🔄 Active sessions: {active_sessions}\n"
+            f"💾 Backups: {backup_count}\n\n"
+            f"*Session Settings*\n"
+            f"⏱️ Standard session: {int(SESSION_TIMEOUT.total_seconds()/60)} minutes\n"
+            f"⏱️ Extended session: {int(EXTENDED_SESSION_TIMEOUT.total_seconds()/60)} minutes"
         )
         
-        await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            status_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
     else:
-        # Regular users get authentication status
-        if str(user_id) in bot_data.authenticated_users and bot_data.is_session_valid(user_id):
-            # Get user data
+        # Check if user is authenticated
+        if bot_data.is_session_valid(user_id):
             user_data = bot_data.authenticated_users[str(user_id)]
-            auth_time = datetime.fromisoformat(user_data.get("timestamp", ""))
-            last_activity = datetime.fromisoformat(user_data.get("last_activity", ""))
             session_type = user_data.get("session_type", "standard")
+            authenticated_at = datetime.fromisoformat(user_data.get("authenticated_at", datetime.now().isoformat()))
+            last_activity = datetime.fromisoformat(user_data.get("last_activity", datetime.now().isoformat()))
             
-            # Update last activity time
-            bot_data.update_activity(user_id)
+            time_since_auth = datetime.now() - authenticated_at
+            time_since_activity = datetime.now() - last_activity
             
-            # Calculate remaining time based on session type
-            timeout = EXTENDED_SESSION_TIMEOUT if session_type == "extended" else SESSION_TIMEOUT
-            time_diff = datetime.now() - last_activity
-            remaining_mins = max(0, timeout - int(time_diff.total_seconds() / 60))
-            
-            status_text = (
-                "*Your Authentication Status:*\n"
-                f"• Status: Authenticated ✅\n"
-                f"• Session type: {session_type.capitalize()}\n"
-                f"• Authenticated since: {auth_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"• Session expires in: {remaining_mins} minutes\n"
-                f"• Last activity: {last_activity.strftime('%Y-%m-%d %H:%M:%S')}"
+            status_message = (
+                f"*Your Status*\n\n"
+                f"✅ Authenticated: Yes\n"
+                f"🔑 Session type: {session_type.capitalize()}\n"
+                f"⏰ Authenticated {int(time_since_auth.total_seconds()/60)} minutes ago\n"
+                f"⌛ Last activity: {int(time_since_activity.total_seconds()/60)} minutes ago\n"
+                f"🤖 Bot uptime: {uptime_str}"
             )
             
-            await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
-        else:
-            # Not authenticated or session expired
-            if str(user_id) in bot_data.authenticated_users:
-                # Session expired, remove from authenticated users
-                del bot_data.authenticated_users[str(user_id)]
-                bot_data.save_to_file()
-                
             await update.message.reply_text(
-                "*Your Authentication Status:*\n"
-                "• Status: Not authenticated ❌\n\n"
-                "Please use /start to authenticate.",
+                status_message,
                 parse_mode=ParseMode.MARKDOWN
             )
+        else:
+            # User is not authenticated
+            not_auth_msg = await update.message.reply_text(
+                "❌ You are not authenticated. Please use /start to authenticate."
+            )
+            
+            # Auto-delete the "Not authenticated" message after 15 seconds
+            asyncio.create_task(delete_message_after_delay(not_auth_msg, 15))
 
 async def delete_message_after_delay(message, delay_seconds):
     """Delete a message after a specified delay."""
