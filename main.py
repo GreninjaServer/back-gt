@@ -1174,6 +1174,400 @@ async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Could not find the detailed message in the backup group."
         )
 
+async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Relay text messages to admin and group."""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Check if message is in private chat
+    if update.effective_chat.type != "private":
+        # Don't relay messages from groups
+        return
+    
+    # If it's the admin, just acknowledge
+    if user_id == ADMIN_ID:
+        # Just acknowledge, no reply functionality needed
+        admin_msg = await update.message.reply_text("Message received.")
+        # Auto-delete the confirmation after 5 seconds
+        asyncio.create_task(delete_message_after_delay(admin_msg, 5))
+        return
+    
+    # Check if user is authenticated and session is valid
+    if not bot_data.is_session_valid(user_id):
+        # Authentication expired or user not authenticated
+        if str(user_id) in bot_data.authenticated_users:
+            # Session expired, remove from authenticated users
+            del bot_data.authenticated_users[str(user_id)]
+            bot_data.save_to_file()
+            auth_error = await update.message.reply_text(
+                "Your session has expired. Please authenticate again with /start"
+            )
+            # Auto-delete after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_error, 10))
+            
+            # Clear chat history after session expiry
+            await clear_chat_history(context, user_id)
+        else:
+            auth_required = await update.message.reply_text(
+                "You need to authenticate first. Please use /start command."
+            )
+            # Auto-delete after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_required, 10))
+        return
+    
+    # Update last activity timestamp for valid sessions
+    bot_data.update_activity(user_id)
+    
+    # Get the message content
+    message_content = update.message.text
+    message_id = update.message.message_id
+    
+    # IMPORTANT: Delete the original message first, before sending any confirmation
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete user message: {e}")
+    
+    # Send plain message to admin WITHOUT metadata header
+    admin_msg = await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=message_content
+    )
+    
+    # Log the message metadata in the group if configured
+    if GROUP_ID:
+        try:
+            # Send detailed message to group with action buttons
+            group_message = (
+                f"📨 *Message from {user_name}*\n"
+                f"👤 ID: `{user_id}`\n"
+                f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"{message_content}"
+            )
+            
+            # Create action buttons for admin
+            keyboard = [
+                [InlineKeyboardButton("Reply to User", callback_data=f"reply_{user_id}")],
+                [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            group_msg = await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=group_message,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+            
+            # Store message mapping for /showme command
+            if not hasattr(context.bot_data, 'message_map'):
+                context.bot_data['message_map'] = {}
+            
+            # Map the admin message ID to the group message ID
+            context.bot_data['message_map'][str(admin_msg.message_id)] = {
+                'chat_id': GROUP_ID,
+                'message_id': group_msg.message_id,
+                'sender_id': user_id,
+                'sender_name': user_name,
+                'media_type': "Message"
+            }
+            
+            # Send a single small note about /showme once per conversation
+            if not context.user_data.get('showme_info_sent'):
+                info_msg = await admin_msg.reply_text(
+                    "Reply with /showme to see full message details in backup group.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                context.user_data['showme_info_sent'] = True
+                # Delete this info after 10 seconds
+                asyncio.create_task(delete_message_after_delay(info_msg, 10))
+                
+        except Exception as e:
+            logger.error(f"Failed to relay message to group: {e}")
+    
+    # Send confirmation that will be deleted
+    confirm_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Message sent"
+    )
+    
+    # Delete confirmation after a short delay
+    asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
+
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle non-text media messages."""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Check if message is in private chat
+    if update.effective_chat.type != "private":
+        # Don't relay messages from groups
+        return
+    
+    # If it's the admin, just acknowledge
+    if user_id == ADMIN_ID:
+        # Just acknowledge
+        admin_msg = await update.message.reply_text("Media received.")
+        # Auto-delete confirmation after 5 seconds
+        asyncio.create_task(delete_message_after_delay(admin_msg, 5))
+        return
+    
+    # Check if user is authenticated and session is valid
+    if not bot_data.is_session_valid(user_id):
+        # Authentication expired or user not authenticated
+        if str(user_id) in bot_data.authenticated_users:
+            # Session expired, remove from authenticated users
+            del bot_data.authenticated_users[str(user_id)]
+            bot_data.save_to_file()
+            auth_error = await update.message.reply_text(
+                "Your session has expired. Please authenticate again with /start"
+            )
+            # Auto-delete after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_error, 10))
+            
+            # Clear chat history after session expiry
+            await clear_chat_history(context, user_id)
+        else:
+            auth_required = await update.message.reply_text(
+                "You need to authenticate first. Please use /start command."
+            )
+            # Auto-delete after 10 seconds
+            asyncio.create_task(delete_message_after_delay(auth_required, 10))
+        return
+    
+    # Update last activity timestamp for valid sessions
+    bot_data.update_activity(user_id)
+    
+    # Determine media type and relay to admin
+    media_type = "Unknown"
+    file_id = None
+    caption = update.message.caption or ""
+    
+    if update.message.photo:
+        media_type = "Photo"
+        file_id = update.message.photo[-1].file_id  # Get the largest photo
+    elif update.message.video:
+        media_type = "Video"
+        file_id = update.message.video.file_id
+    elif update.message.audio:
+        media_type = "Audio"
+        file_id = update.message.audio.file_id
+    elif update.message.voice:
+        media_type = "Voice"
+        file_id = update.message.voice.file_id
+    elif update.message.document:
+        media_type = "Document"
+        file_id = update.message.document.file_id
+    elif update.message.sticker:
+        media_type = "Sticker"
+        file_id = update.message.sticker.file_id
+    elif update.message.animation:
+        media_type = "Animation"
+        file_id = update.message.animation.file_id
+    elif update.message.video_note:
+        media_type = "Video Note"
+        file_id = update.message.video_note.file_id
+    
+    # IMPORTANT: Save the original message before deleting it
+    # This needs to happen before we delete the message
+    original_message = update.message
+    
+    # Try to delete the original message first
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete user media: {e}")
+    
+    # Forward media to admin
+    try:
+        # Send media to admin (just the media, no header text)
+        admin_msg = None
+        if media_type == "Photo":
+            admin_msg = await context.bot.send_photo(chat_id=ADMIN_ID, photo=file_id, caption=caption)
+        elif media_type == "Video":
+            admin_msg = await context.bot.send_video(chat_id=ADMIN_ID, video=file_id, caption=caption)
+        elif media_type == "Audio":
+            admin_msg = await context.bot.send_audio(chat_id=ADMIN_ID, audio=file_id, caption=caption)
+        elif media_type == "Voice":
+            admin_msg = await context.bot.send_voice(chat_id=ADMIN_ID, voice=file_id, caption=caption)
+        elif media_type == "Document":
+            admin_msg = await context.bot.send_document(chat_id=ADMIN_ID, document=file_id, caption=caption)
+        elif media_type == "Sticker":
+            admin_msg = await context.bot.send_sticker(chat_id=ADMIN_ID, sticker=file_id)
+        elif media_type == "Animation":
+            admin_msg = await context.bot.send_animation(chat_id=ADMIN_ID, animation=file_id, caption=caption)
+        elif media_type == "Video Note":
+            admin_msg = await context.bot.send_video_note(chat_id=ADMIN_ID, video_note=file_id)
+        else:
+            # Forward unknown media types directly
+            admin_msg = await original_message.forward(chat_id=ADMIN_ID)
+        
+        # Send detailed info AND the media to the backup group
+        if GROUP_ID and admin_msg:
+            # First send the media file to the group
+            group_media_msg = None
+            if media_type == "Photo":
+                group_media_msg = await context.bot.send_photo(chat_id=GROUP_ID, photo=file_id, caption=caption)
+            elif media_type == "Video":
+                group_media_msg = await context.bot.send_video(chat_id=GROUP_ID, video=file_id, caption=caption)
+            elif media_type == "Audio":
+                group_media_msg = await context.bot.send_audio(chat_id=GROUP_ID, audio=file_id, caption=caption)
+            elif media_type == "Voice":
+                group_media_msg = await context.bot.send_voice(chat_id=GROUP_ID, voice=file_id, caption=caption)
+            elif media_type == "Document":
+                group_media_msg = await context.bot.send_document(chat_id=GROUP_ID, document=file_id, caption=caption)
+            elif media_type == "Sticker":
+                group_media_msg = await context.bot.send_sticker(chat_id=GROUP_ID, sticker=file_id)
+            elif media_type == "Animation":
+                group_media_msg = await context.bot.send_animation(chat_id=GROUP_ID, animation=file_id, caption=caption)
+            elif media_type == "Video Note":
+                group_media_msg = await context.bot.send_video_note(chat_id=GROUP_ID, video_note=file_id)
+            else:
+                # Forward unknown media types directly
+                group_media_msg = await original_message.forward(chat_id=GROUP_ID)
+            
+            # Then send the info message with action buttons
+            group_info = (
+                f"📨 *{media_type} from {user_name}*\n"
+                f"👤 ID: `{user_id}`\n"
+                f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            if caption:
+                group_info += f"\n\n*Caption:* {caption}"
+            
+            # Create action buttons for admin
+            keyboard = [
+                [InlineKeyboardButton("Reply to User", callback_data=f"reply_{user_id}")],
+                [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            group_msg = await context.bot.send_message(
+                chat_id=GROUP_ID,
+                text=group_info,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup
+            )
+            
+            # Store message mapping for /showme command
+            if not hasattr(context.bot_data, 'message_map'):
+                context.bot_data['message_map'] = {}
+            
+            # Map the admin message ID to BOTH group messages 
+            # (use the media message ID as primary for /showme)
+            context.bot_data['message_map'][str(admin_msg.message_id)] = {
+                'chat_id': GROUP_ID,
+                'message_id': group_media_msg.message_id,  # Use the media message ID
+                'info_message_id': group_msg.message_id,   # Store the info message ID too
+                'sender_id': user_id,
+                'sender_name': user_name,
+                'media_type': media_type
+            }
+            
+            # Send a single small note about /showme once per conversation
+            if not context.user_data.get('showme_info_sent'):
+                info_msg = await admin_msg.reply_text(
+                    "Reply with /showme to see full message details in backup group.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                context.user_data['showme_info_sent'] = True
+                # Delete this info after 10 seconds
+                asyncio.create_task(delete_message_after_delay(info_msg, 10))
+    
+    except Exception as e:
+        logger.error(f"Failed to relay media: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Failed to send media. Please try again later."
+        )
+        return
+    
+    # Send confirmation that will be deleted
+    confirm_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"{media_type} sent"
+    )
+    
+    # Delete confirmation after a short delay
+    asyncio.create_task(delete_message_after_delay(confirm_msg, 3))
+
+async def delete_message_after_delay(message, delay_seconds):
+    """Delete a message after a specified delay."""
+    await asyncio.sleep(delay_seconds)
+    try:
+        await message.delete()
+    except Exception as e:
+        # Don't log common errors like "message to delete not found"
+        if "message to delete not found" not in str(e).lower():
+            logger.warning(f"Could not delete message: {e}")
+            
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors caused by updates."""
+    logger.error(f"Update {update} caused error: {context.error}")
+    
+    # Notify admin of errors
+    if ADMIN_ID:
+        error_message = f"⚠️ *ERROR ALERT*\n\n"
+        
+        if update:
+            if update.effective_user:
+                error_message += f"User: {update.effective_user.first_name} (ID: {update.effective_user.id})\n"
+            if update.effective_chat:
+                error_message += f"Chat: {update.effective_chat.title} (ID: {update.effective_chat.id})\n"
+            if update.effective_message:
+                error_message += f"Message: {update.effective_message.text if update.effective_message.text else '[No text]'}\n"
+        
+        error_message += f"\nError: {context.error}"
+        
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=error_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to send error notification: {e}")
+
+async def register_bot_commands(application: Application) -> None:
+    """Register bot commands with Telegram to show in the command menu."""
+    # Define commands for regular users
+    user_commands = [
+        ("start", "Start the bot and authenticate"),
+        ("status", "Check your authentication status"),
+        ("help", "Show help information")
+    ]
+    
+    # Define commands for admin
+    admin_commands = [
+        ("start", "Start the bot and authenticate"),
+        ("help", "Show help information"),
+        ("status", "Check system status and active sessions"),
+        ("cmd", "Show command list"),
+        ("setupgroup", "Set current group as backup group"),
+        ("broadcast", "Send message to all users"),
+        ("block", "Block a user from using the bot"),
+        ("unblock", "Unblock a previously blocked user"),
+        ("users", "List all authenticated users"),
+        ("setquestion", "Set security question and answer"),
+        ("showme", "See full message details when replying"),
+        ("clearall", "Clear all authenticated users")
+    ]
+    
+    # Set commands for regular users (visible in private chats)
+    await application.bot.set_my_commands(
+        [BotCommand(command, description) for command, description in user_commands],
+        scope=BotCommandScopeAllPrivateChats()
+    )
+    
+    # Set commands for admin (visible only to admin)
+    if ADMIN_ID:
+        await application.bot.set_my_commands(
+            [BotCommand(command, description) for command, description in admin_commands],
+            scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+        )
+    
+    logger.info("Bot commands registered")
+
 def main() -> None:
     """Start the bot."""
     # Create the Application
