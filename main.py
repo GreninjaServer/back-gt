@@ -193,13 +193,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         session_type = session_info.get("session_type", "standard")
         timeout_seconds = session_info.get("session_timeout", SESSION_TIMEOUT.total_seconds())
         minutes_remaining = int(timeout_seconds / 60)
-        
-        await update.message.reply_text(
+            
+            await update.message.reply_text(
             f"Hello {user_name}!\n\n"
             f"You are already authenticated with a {session_type} session.\n"
             f"Session timeout: {minutes_remaining} minutes of inactivity."
-        )
-        return ConversationHandler.END
+            )
+            return ConversationHandler.END
     
     # User needs to authenticate
     # Choose a random security question
@@ -305,18 +305,16 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     }
     bot_data.save_to_file()
     
-    # Prepare authentication notification message
-    auth_message = (
-        f"🔐 *New Authentication*\n"
-        f"👤 User: {user_name}\n"
-        f"🆔 ID: `{user_id}`\n"
-        f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"📝 Session: {session_type.capitalize()} ({int(session_timeout.total_seconds()/60)} min)"
-    )
-    
-    # Send authentication notification to backup group (not to admin's bot chat)
+    # Send detailed authentication notification ONLY to backup group
     if GROUP_ID:
         try:
+            auth_message = (
+                f"🔐 *New Authentication*\n"
+                f"👤 User: {user_name}\n"
+                f"🆔 ID: `{user_id}`\n"
+                f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"📝 Session: {session_type.capitalize()} ({int(session_timeout.total_seconds()/60)} min)"
+            )
             await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=auth_message,
@@ -325,27 +323,17 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             logger.error(f"Failed to send authentication notification to group: {e}")
     
-    # Remove the keyboard
+    # Remove the keyboard and update the message
     await query.edit_message_text(
         text=f"Authentication successful! You have a {session_type} session that expires in {int(session_timeout.total_seconds()/60)} minutes."
     )
     
-    # Send message to user about authentication success
+    # Send a simple confirmation to the user
     await context.bot.send_message(
         chat_id=user_id,
         text=f"✅ You're now authenticated for a {session_type} session.\n"
              f"Session will expire after {int(session_timeout.total_seconds()/60)} minutes of inactivity."
     )
-    
-    # Notify the admin via a private message (not in the bot chat)
-    try:
-        admin_notification = f"📱 User {user_name} (ID: {user_id}) authenticated with {session_type} session."
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=admin_notification
-        )
-    except Exception as e:
-        logger.error(f"Failed to notify admin about authentication: {e}")
     
     return ConversationHandler.END
 
@@ -802,11 +790,11 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "/help - Show help message\n"
             "/cmd - Show this command list"
         )
-    
+            
     await update.message.reply_text(
         commands,
         parse_mode=ParseMode.MARKDOWN
-    )
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
