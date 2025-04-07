@@ -848,6 +848,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• Your session expires after 15 minutes of inactivity\n"
             "• Use /status to check your authentication status"
         )
+         # Schedule deletion of help message
+        asyncio.create_task(delete_message_after_delay(error_msg, 13))
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
