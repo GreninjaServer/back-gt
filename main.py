@@ -335,7 +335,7 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
              f"Session will expire after {int(session_timeout.total_seconds()/60)} minutes of inactivity."
     )
     
-        return ConversationHandler.END
+    return ConversationHandler.END
 
 async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command to set up the backup group."""
