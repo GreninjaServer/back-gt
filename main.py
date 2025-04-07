@@ -295,14 +295,19 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         session_type = "extended"
         session_timeout = EXTENDED_SESSION_TIMEOUT
     
+    # Calculate expiration time and session duration
+    current_time = datetime.now()
+    expiry_time = current_time + timedelta(seconds=session_timeout.total_seconds())
+    session_minutes = int(session_timeout.total_seconds() / 60)
+    
     # Authenticate the user with the appropriate session timeout
-    current_time = datetime.now().isoformat()
     bot_data.authenticated_users[str(user_id)] = {
         "name": user_name,
-        "authenticated_at": current_time,
-        "last_activity": current_time,
+        "authenticated_at": current_time.isoformat(),
+        "last_activity": current_time.isoformat(),
         "session_type": session_type,
-        "session_timeout": session_timeout.total_seconds()
+        "session_timeout": session_timeout.total_seconds(),
+        "expiry_time": expiry_time.isoformat()
     }
     bot_data.save_to_file()
     
@@ -313,8 +318,8 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"🔐 *New Authentication*\n"
                 f"👤 User: {user_name}\n"
                 f"🆔 ID: `{user_id}`\n"
-                f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"📝 Session: {session_type.capitalize()} ({int(session_timeout.total_seconds()/60)} min)"
+                f"⏰ Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"📝 Session: {session_type.capitalize()} ({session_minutes} min)"
             )
             
             # Create action buttons for the admin to manage this user
@@ -335,69 +340,145 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     # Remove the keyboard and update the message
     await query.edit_message_text(
-        text=f"Authentication successful! You have a {session_type} session that expires in {int(session_timeout.total_seconds()/60)} minutes."
+        text=f"Authentication successful! You have a {session_type} session."
     )
     
-    # Send a simple confirmation to the user with live timer
-    session_minutes = int(session_timeout.total_seconds() / 60)
-    
-    # For extended sessions (24h+), schedule chat clearing after the session ends
-    if session_type == "extended":
+    # For both standard and extended sessions, create a countdown timer
+    try:
+        # Format duration in hours:minutes for display
+        if session_minutes >= 60:
+            hours = session_minutes // 60
+            mins = session_minutes % 60
+            duration_str = f"{hours}h {mins}m"
+        else:
+            duration_str = f"{session_minutes}m"
+            
+        # Create a timer message that looks like a countdown
+        timer_text = (
+            f"⏱️ *Session Countdown*\n\n"
+            f"Time remaining: `{duration_str}`\n"
+            f"Session expires: {expiry_time.strftime('%H:%M:%S')}\n\n"
+            f"📝 Session type: {session_type.capitalize()}\n"
+            f"⚠️ _Chat history will be cleared when session ends_"
+        )
+        
+        # Send countdown message
+        timer_msg = await context.bot.send_message(
+            chat_id=user_id,
+            text=timer_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Pin this message so it's always visible
         try:
+            await context.bot.pin_chat_message(
+                chat_id=user_id,
+                message_id=timer_msg.message_id,
+                disable_notification=True
+            )
+        except Exception as e:
+            logger.warning(f"Could not pin timer message: {e}")
+            
+        # Schedule message updates to simulate countdown (every minute)
+        # Store the message ID in user data for updating
+        if not hasattr(context.user_data, 'timer_messages'):
+            context.user_data['timer_messages'] = {}
+        context.user_data['timer_messages'][user_id] = {
+            'message_id': timer_msg.message_id,
+            'expiry_time': expiry_time,
+            'session_type': session_type
+        }
+        
+        # Start a background task to update the timer
+        asyncio.create_task(update_timer(context, user_id, timer_msg.message_id, expiry_time, session_type))
+            
+        # For extended sessions, schedule chat clearing after the session expires
+        if session_type == "extended":
             # Schedule chat history clearing after the session expires
             # We'll provide a small buffer (5 minutes) after the session expires
             clear_delay = int(session_timeout.total_seconds()) + 300  # Session timeout + 5 minutes
             await schedule_chat_clear(context, user_id, clear_delay)
-            
-            # Send timer message
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ You're now authenticated for a {session_type} session.\n"
-                     f"Your session will expire in {session_minutes} minutes "
-                     f"({session_minutes // 60} hours) of inactivity.\n\n"
-                     f"📝 *Note:* Chat history will be cleared after your session expires."
-            )
-            
-            # For extended sessions, start a countdown timer using a live location
-            # This is a creative workaround to show a timer in Telegram
-            try:
-                # Calculate expiration time (current time + session duration)
-                expiry_time = datetime.now() + timedelta(seconds=session_timeout.total_seconds())
-                
-                # Send a message with the expiration time
-                timer_msg = await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"⏱️ *Session Timer*\n"
-                         f"Your session will expire at: {expiry_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                         f"Remaining: {session_minutes} minutes",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                # Pin this message so it's always visible
-                try:
-                    await context.bot.pin_chat_message(
-                        chat_id=user_id,
-                        message_id=timer_msg.message_id,
-                        disable_notification=True
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not pin timer message: {e}")
-                    
-            except Exception as e:
-                logger.error(f"Failed to create session timer: {e}")
-        except Exception as e:
-            logger.error(f"Failed to schedule chat clearing for extended session: {e}")
-    else:
-        # For standard sessions, just send a normal confirmation
+        
+    except Exception as e:
+        logger.error(f"Failed to create session timer: {e}")
+        
+        # Send a simple fallback message if timer creation fails
         await context.bot.send_message(
             chat_id=user_id,
             text=f"✅ You're now authenticated for a {session_type} session.\n"
-                 f"Session will expire after {session_minutes} minutes of inactivity.\n\n"
-                 f"📝 *Note:* Chat history will be cleared when your session expires.",
+                 f"Session will expire after {session_minutes} minutes of inactivity.",
             parse_mode=ParseMode.MARKDOWN
         )
     
     return ConversationHandler.END
+
+async def update_timer(context: ContextTypes.DEFAULT_TYPE, user_id: int, message_id: int, expiry_time: datetime, session_type: str) -> None:
+    """Update the countdown timer message regularly."""
+    try:
+        # Check if user is still authenticated
+        while bot_data.is_session_valid(user_id):
+            # Calculate remaining time
+            now = datetime.now()
+            time_left = expiry_time - now
+            
+            if time_left.total_seconds() <= 0:
+                # Timer expired
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=user_id,
+                        message_id=message_id,
+                        text="⏱️ *Session Expired*\n\nYour session has ended. Please authenticate again.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not update expired timer: {e}")
+                break
+                
+            # Format remaining time
+            hours, remainder = divmod(time_left.total_seconds(), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            if hours > 0:
+                time_str = f"{int(hours)}:{int(minutes):02d}:{int(seconds):02d}"
+                duration_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+            else:
+                time_str = f"{int(minutes):02d}:{int(seconds):02d}"
+                duration_str = f"{int(minutes)}m {int(seconds)}s"
+            
+            # Prepare the updated message
+            timer_text = (
+                f"⏱️ *Session Countdown*\n\n"
+                f"Time remaining: `{time_str}`\n"
+                f"Session expires at: {expiry_time.strftime('%H:%M:%S')}\n\n"
+                f"📝 Session type: {session_type.capitalize()}\n"
+                f"⚠️ _Chat history will be cleared when session ends_"
+            )
+            
+            # Update the message
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=message_id,
+                    text=timer_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.warning(f"Could not update timer message: {e}")
+                
+            # Wait for the next update (update more frequently as time gets closer)
+            if time_left.total_seconds() > 300:  # More than 5 minutes
+                await asyncio.sleep(60)  # Update every minute
+            elif time_left.total_seconds() > 60:  # Between 1-5 minutes
+                await asyncio.sleep(30)  # Update every 30 seconds
+            else:
+                await asyncio.sleep(10)  # Update every 10 seconds in the last minute
+                
+    except Exception as e:
+        logger.error(f"Error updating countdown timer: {e}")
+    finally:
+        # Ensure we clear user data
+        if user_id in context.user_data.get('timer_messages', {}):
+            del context.user_data['timer_messages'][user_id]
 
 async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command to set up the backup group."""
