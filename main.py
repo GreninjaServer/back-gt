@@ -731,6 +731,449 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("Operation cancelled.")
         await query.edit_message_text("❌ Clear all operation cancelled.")
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /help is issued."""
+    user_id = update.effective_user.id
+    
+    if user_id == ADMIN_ID:
+        help_text = (
+            "*🤖 GT-UP Bot - Admin Help*\n\n"
+            "This bot allows users to send you messages after authentication.\n\n"
+            "*Key Features:*\n"
+            "• Secure authentication with custom security question\n"
+            "• Backup group for message logging\n"
+            "• Session management (15-minute timeout)\n"
+            "• User blocking capabilities\n\n"
+            "Use /cmd to see all available commands."
+        )
+        help_msg = await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        # Schedule deletion of help message after 13 seconds
+        asyncio.create_task(delete_message_after_delay(help_msg, 13))
+    else:
+        help_text = (
+            "*🤖 GT-UP Bot - Help*\n\n"
+            "This bot allows you to send messages to the admin.\n\n"
+            "*How to use:*\n"
+            "1. Use /start to authenticate\n"
+            "2. Answer the security question correctly\n"
+            "3. Send your message once authenticated\n\n"
+            "*Notes:*\n"
+            "• Your session expires after 15 minutes of inactivity\n"
+            "• Use /status to check your authentication status"
+        )
+        help_msg = await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        # Schedule deletion of help message after 13 seconds
+        asyncio.create_task(delete_message_after_delay(help_msg, 13))
+
+async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show available commands."""
+    user_id = update.effective_user.id
+    
+    # Check if user is authenticated
+    if not bot_data.is_session_valid(user_id) and user_id != ADMIN_ID:
+        not_auth_msg = await update.message.reply_text(
+            "❌ You are not authenticated. Please use /start to authenticate."
+        )
+        # Auto-delete the message after 15 seconds
+        asyncio.create_task(delete_message_after_delay(not_auth_msg, 15))
+        return
+    
+    # Update last activity for authenticated users
+    if str(user_id) in bot_data.authenticated_users:
+        bot_data.update_activity(user_id)
+    
+    # Build command list
+    if user_id == ADMIN_ID:
+        commands = (
+            "*Available Commands*\n\n"
+            "General commands:\n"
+            "/start - Start the bot and authenticate\n"
+            "/status - Show bot status\n"
+            "/help - Show help message\n"
+            "/cmd - Show this command list\n\n"
+            
+            "Admin commands:\n"
+            "/broadcast - Send message to all authenticated users\n"
+            "/clearall - Clear all authenticated users\n"
+            "/showme - Show message details in backup group"
+        )
+    else:
+        commands = (
+            "*Available Commands*\n\n"
+            "/start - Start the bot and authenticate\n"
+            "/status - Check your authentication status\n"
+            "/help - Show help message\n"
+            "/cmd - Show this command list"
+        )
+            
+    await update.message.reply_text(
+        commands,
+        parse_mode=ParseMode.MARKDOWN
+        )
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bot status information."""
+    user_id = update.effective_user.id
+    
+    # Calculate uptime
+    uptime = datetime.now() - bot_data.start_time
+    days, remainder = divmod(uptime.total_seconds(), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m {int(seconds)}s"
+    
+    # Count active sessions
+    active_sessions = 0
+    for user_id_str, user_data in bot_data.authenticated_users.items():
+        if bot_data.is_session_valid(int(user_id_str)):
+            active_sessions += 1
+    
+    # Count backups
+    backup_count = 0
+    if os.path.exists(BACKUP_DIR):
+        backup_count = len([f for f in os.listdir(BACKUP_DIR) if f.startswith("bot_data_") and f.endswith(".json")])
+    
+    # If user is admin, show detailed status
+    if user_id == ADMIN_ID:
+        status_message = (
+            f"*Bot Status*\n\n"
+            f"🕒 Uptime: {uptime_str}\n"
+            f"👥 Authenticated users: {len(bot_data.authenticated_users)}\n"
+            f"🔄 Active sessions: {active_sessions}\n"
+            f"💾 Backups: {backup_count}\n\n"
+            f"*Session Settings*\n"
+            f"⏱️ Standard session: {int(SESSION_TIMEOUT.total_seconds()/60)} minutes\n"
+            f"⏱️ Extended session: {int(EXTENDED_SESSION_TIMEOUT.total_seconds()/60)} minutes"
+        )
+        
+        await update.message.reply_text(
+            status_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        # Check if user is authenticated
+        if bot_data.is_session_valid(user_id):
+            user_data = bot_data.authenticated_users[str(user_id)]
+            session_type = user_data.get("session_type", "standard")
+            authenticated_at = datetime.fromisoformat(user_data.get("authenticated_at", datetime.now().isoformat()))
+            last_activity = datetime.fromisoformat(user_data.get("last_activity", datetime.now().isoformat()))
+            
+            time_since_auth = datetime.now() - authenticated_at
+            time_since_activity = datetime.now() - last_activity
+            
+            status_message = (
+                f"*Your Status*\n\n"
+                f"✅ Authenticated: Yes\n"
+                f"🔑 Session type: {session_type.capitalize()}\n"
+                f"⏰ Authenticated {int(time_since_auth.total_seconds()/60)} minutes ago\n"
+                f"⌛ Last activity: {int(time_since_activity.total_seconds()/60)} minutes ago\n"
+                f"🤖 Bot uptime: {uptime_str}"
+            )
+            
+            await update.message.reply_text(
+                status_message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            # User is not authenticated
+            not_auth_msg = await update.message.reply_text(
+                "❌ You are not authenticated. Please use /start to authenticate."
+            )
+            
+            # Auto-delete the "Not authenticated" message after 15 seconds
+            asyncio.create_task(delete_message_after_delay(not_auth_msg, 15))
+
+async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Command to set up the backup group."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can set up the backup group.")
+        return
+    
+    # Check if this is a group chat
+    chat_type = update.effective_chat.type
+    if chat_type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command should only be used in a group chat.")
+        return
+    
+    global GROUP_ID
+    GROUP_ID = str(update.effective_chat.id)
+    
+    # Save to .env file
+    try:
+        with open(".env", "r") as file:
+            env_lines = file.readlines()
+        
+        # Check if GROUP_ID already exists in the file
+        group_id_exists = False
+        for i, line in enumerate(env_lines):
+            if line.startswith("GROUP_ID="):
+                env_lines[i] = f"GROUP_ID={GROUP_ID}\n"
+                group_id_exists = True
+                break
+        
+        # If GROUP_ID doesn't exist, add it
+        if not group_id_exists:
+            env_lines.append(f"GROUP_ID={GROUP_ID}\n")
+        
+        # Write back to the file
+        with open(".env", "w") as file:
+            file.writelines(env_lines)
+        
+        await update.message.reply_text(f"✅ Backup group has been set up with ID: {GROUP_ID}")
+        await update.message.reply_text("This group will now receive all messages sent to the bot.")
+    except Exception as e:
+        logger.error(f"Error updating .env file: {e}")
+        await update.message.reply_text(f"⚠️ Error saving group ID to .env file: {e}")
+        await update.message.reply_text(f"Group ID set temporarily for this session: {GROUP_ID}")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Broadcast a message to all authenticated users."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can broadcast messages.")
+        return
+    
+    # Check if there's a message to broadcast
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide a message to broadcast.\n"
+            "Usage: /broadcast Your message here"
+        )
+        return
+    
+    broadcast_message = " ".join(context.args)
+    sent_count = 0
+    failed_count = 0
+    
+    # Send message to all authenticated users
+    for user_id_str, user_data in bot_data.authenticated_users.items():
+        user_id = int(user_id_str)
+        if user_id != ADMIN_ID:  # Don't send to yourself
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"📢 *Broadcast Message*\n\n{broadcast_message}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"Failed to send broadcast to user {user_id}: {e}")
+                failed_count += 1
+    
+    await update.message.reply_text(
+        f"✅ Broadcast sent to {sent_count} users\n"
+        f"❌ Failed to send to {failed_count} users"
+    )
+
+async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Block a user from using the bot."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can block users.")
+        return
+    
+    # Check if there's a user ID provided
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide a user ID to block.\n"
+            "Usage: /block 123456789"
+        )
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        
+        # Don't allow blocking the admin
+        if target_user_id == ADMIN_ID:
+            await update.message.reply_text("You cannot block yourself as the admin.")
+            return
+        
+        # Add user to blocked list if not already blocked
+        if target_user_id not in bot_data.blocked_users:
+            bot_data.blocked_users.append(target_user_id)
+            
+            # Remove from authenticated users if present
+            if str(target_user_id) in bot_data.authenticated_users:
+                del bot_data.authenticated_users[str(target_user_id)]
+            
+            bot_data.save_to_file()
+            await update.message.reply_text(f"User {target_user_id} has been blocked.")
+        else:
+            await update.message.reply_text(f"User {target_user_id} is already blocked.")
+    except ValueError:
+        await update.message.reply_text("Please provide a valid user ID (numbers only).")
+
+async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Unblock a user from using the bot."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can unblock users.")
+        return
+    
+    # Check if there's a user ID provided
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide a user ID to unblock.\n"
+            "Usage: /unblock 123456789"
+        )
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        
+        # Remove user from blocked list
+        if target_user_id in bot_data.blocked_users:
+            bot_data.blocked_users.remove(target_user_id)
+            bot_data.save_to_file()
+            await update.message.reply_text(f"User {target_user_id} has been unblocked.")
+        else:
+            await update.message.reply_text(f"User {target_user_id} is not blocked.")
+    except ValueError:
+        await update.message.reply_text("Please provide a valid user ID (numbers only).")
+
+async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all authenticated users."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can view the user list.")
+        return
+    
+    if not bot_data.authenticated_users:
+        await update.message.reply_text("No authenticated users found.")
+        return
+    
+    user_list = "*Authenticated Users:*\n\n"
+    for user_id_str, user_data in bot_data.authenticated_users.items():
+        user_id = user_id_str
+        name = user_data.get("name", "Unknown")
+        authenticated_at = user_data.get("authenticated_at", "Unknown")
+        session_type = user_data.get("session_type", "standard")
+        
+        user_list += f"• ID: `{user_id}`\n"
+        user_list += f"  Name: {name}\n"
+        user_list += f"  Session: {session_type}\n"
+        user_list += f"  Authenticated: {authenticated_at[:16]}\n\n"
+    
+    user_list += f"Total users: {len(bot_data.authenticated_users)}"
+    
+    try:
+        await update.message.reply_text(user_list, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        # If the message is too long, split it
+        await update.message.reply_text("User list is too long, sending in parts...")
+        chunks = [user_list[i:i+4000] for i in range(0, len(user_list), 4000)]
+        for chunk in chunks:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+
+async def set_security_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set a new security question and answer."""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("Only the admin can change security questions.")
+        return
+    
+    # Check if there's text provided
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide a question and answer separated by a pipe (|).\n"
+            "Usage: /setquestion What is the secret code?|secret123"
+        )
+        return
+    
+    input_text = " ".join(context.args)
+    if "|" not in input_text:
+        await update.message.reply_text(
+            "Question and answer must be separated by a pipe (|).\n"
+            "Example: /setquestion What is the secret code?|secret123"
+        )
+        return
+    
+    question, answer = input_text.split("|", 1)
+    question = question.strip()
+    answer = answer.strip()
+    
+    if not question or not answer:
+        await update.message.reply_text("Both question and answer must be provided.")
+        return
+    
+    # Clear existing questions and set the new one
+    bot_data.security_questions = {question: answer}
+    bot_data.save_to_file()
+    
+    await update.message.reply_text(
+        f"✅ Security question updated successfully.\n"
+        f"Question: {question}\n"
+        f"Answer: {answer}"
+    )
+
+async def showme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Link to the original message in the backup group"""
+    user_id = update.effective_user.id
+    
+    # Only admin can use this command
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("This command is only available to the admin.")
+        return
+    
+    # Check if this is a reply to a message
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "Please reply to a message to see its backup group version."
+        )
+        return
+    
+    # Get the original message ID
+    msg_id = update.message.reply_to_message.message_id
+    
+    # Check if we have this message mapped
+    message_map = context.bot_data.get('message_map', {})
+    if str(msg_id) in message_map:
+        group_info = message_map[str(msg_id)]
+        group_id = group_info['chat_id']
+        group_msg_id = group_info['message_id']
+        sender_id = group_info.get('sender_id', 'Unknown')
+        sender_name = group_info.get('sender_name', 'Unknown')
+        media_type = group_info.get('media_type', 'Message')
+        
+        # Remove the -100 prefix for the URL
+        if str(group_id).startswith('-100'):
+            clean_group_id = str(group_id)[4:]
+        else:
+            clean_group_id = str(group_id)
+        
+        # Create the message link
+        message_link = f"https://t.me/c/{clean_group_id}/{group_msg_id}"
+        
+        # Create buttons for various actions
+        keyboard = [
+            [InlineKeyboardButton("View Message Details", url=message_link)],
+            [InlineKeyboardButton("Reply to User", callback_data=f"reply_{sender_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"*Message Info:*\n"
+            f"• From: {sender_name}\n"
+            f"• ID: `{sender_id}`\n"
+            f"• Type: {media_type}\n"
+            f"• Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"Click the buttons below for actions:",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text(
+            "Could not find the detailed message in the backup group."
+        )
+
 def main() -> None:
     """Start the bot."""
     # Create the Application
@@ -744,7 +1187,7 @@ def main() -> None:
             SESSION_SELECTION: [CallbackQueryHandler(session_selection, pattern="^session_")],
         },
         fallbacks=[CommandHandler("start", start)],
-        # Remove per_message=True as it was causing issues
+        per_chat=True, # Use per_chat instead of per_message to avoid warnings and ensure correct function
     )
     application.add_handler(conv_handler)
     
