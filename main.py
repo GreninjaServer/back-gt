@@ -193,13 +193,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         session_type = session_info.get("session_type", "standard")
         timeout_seconds = session_info.get("session_timeout", SESSION_TIMEOUT.total_seconds())
         minutes_remaining = int(timeout_seconds / 60)
-            
-            await update.message.reply_text(
+        
+        await update.message.reply_text(
             f"Hello {user_name}!\n\n"
             f"You are already authenticated with a {session_type} session.\n"
             f"Session timeout: {minutes_remaining} minutes of inactivity."
-            )
-            return ConversationHandler.END
+        )
+        return ConversationHandler.END
     
     # User needs to authenticate
     # Choose a random security question
@@ -335,7 +335,7 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
              f"Session will expire after {int(session_timeout.total_seconds()/60)} minutes of inactivity."
     )
     
-    return ConversationHandler.END
+        return ConversationHandler.END
 
 async def setup_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command to set up the backup group."""
