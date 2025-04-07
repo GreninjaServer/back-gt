@@ -195,11 +195,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         timeout_seconds = session_info.get("session_timeout", SESSION_TIMEOUT.total_seconds())
         minutes_remaining = int(timeout_seconds / 60)
         
-        await update.message.reply_text(
+        already_auth_msg = await update.message.reply_text(
             f"Hello {user_name}!\n\n"
             f"You are already authenticated with a {session_type} session.\n"
             f"Session timeout: {minutes_remaining} minutes of inactivity."
         )
+        # Auto-delete after 10 seconds
+        asyncio.create_task(delete_message_after_delay(already_auth_msg, 10))
         return ConversationHandler.END
     
     # User needs to authenticate
@@ -310,7 +312,7 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "expiry_time": expiry_time.isoformat()
     }
     bot_data.save_to_file()
-    
+        
     # Send detailed authentication notification to backup group with action buttons
     if GROUP_ID:
         try:
@@ -328,7 +330,7 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 [InlineKeyboardButton("Block User", callback_data=f"block_{user_id}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+        
             await context.bot.send_message(
                 chat_id=GROUP_ID,
                 text=auth_message,
@@ -338,15 +340,17 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             logger.error(f"Failed to send authentication notification to group: {e}")
     
-    # Remove the keyboard and update the message
-    await query.edit_message_text(
+    # Remove the keyboard and update the message with auto-deletion after 7 seconds
+    success_msg = await query.edit_message_text(
         text=f"Authentication successful! You have a {session_type} session."
     )
+    # Auto-delete after 7 seconds
+    asyncio.create_task(delete_message_after_delay(success_msg, 7))
     
-    # Send session information to the user
+    # Send session information to the user with auto-deletion after 5 seconds
     expire_info = f"{expiry_time.strftime('%H:%M:%S')}" if session_type == "standard" else f"{expiry_time.strftime('%Y-%m-%d %H:%M:%S')}"
     
-    await context.bot.send_message(
+    session_info_msg = await context.bot.send_message(
         chat_id=user_id,
         text=(
             f"*Session Information*\n\n"
@@ -358,7 +362,9 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ),
         parse_mode=ParseMode.MARKDOWN
     )
-    
+    # Auto-delete after 5 seconds
+    asyncio.create_task(delete_message_after_delay(session_info_msg, 5))
+        
     return ConversationHandler.END
 
 async def clear_chat_history(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
@@ -1281,7 +1287,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 context.user_data['showme_info_sent'] = True
                 # Delete this info after 10 seconds
                 asyncio.create_task(delete_message_after_delay(info_msg, 10))
-                
+            
         except Exception as e:
             logger.error(f"Failed to relay message to group: {e}")
     
@@ -1493,12 +1499,25 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def delete_message_after_delay(message, delay_seconds):
     """Delete a message after a specified delay."""
+    if not message:
+        logger.warning("Attempted to delete a null message")
+        return
+    
+    try:
+        # Verify the message has a chat_id and message_id
+        _ = message.chat_id
+        _ = message.message_id
+    except AttributeError:
+        logger.warning("Attempted to delete an invalid message object")
+        return
+    
     await asyncio.sleep(delay_seconds)
+    
     try:
         await message.delete()
     except Exception as e:
         # Don't log common errors like "message to delete not found"
-        if "message to delete not found" not in str(e).lower():
+        if "message to delete not found" not in str(e).lower() and "message can't be deleted" not in str(e).lower():
             logger.warning(f"Could not delete message: {e}")
             
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
