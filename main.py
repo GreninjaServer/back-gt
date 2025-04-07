@@ -343,30 +343,38 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         text=f"Authentication successful! You have a {session_type} session."
     )
     
-    # For both standard and extended sessions, create a countdown timer
+    # For both standard and extended sessions, create a countdown timer button
     try:
-        # Format duration in hours:minutes for display
-        if session_minutes >= 60:
-            hours = session_minutes // 60
-            mins = session_minutes % 60
-            duration_str = f"{hours}h {mins}m"
-        else:
-            duration_str = f"{session_minutes}m"
-            
-        # Create a timer message that looks like a countdown
-        timer_text = (
-            f"⏱️ *Session Countdown*\n\n"
-            f"Time remaining: `{duration_str}`\n"
-            f"Session expires: {expiry_time.strftime('%H:%M:%S')}\n\n"
-            f"📝 Session type: {session_type.capitalize()}\n"
-            f"⚠️ _Chat history will be cleared when session ends_"
-        )
+        # Calculate remaining time for display
+        remaining_time = expiry_time - datetime.now()
+        hours, remainder = divmod(remaining_time.total_seconds(), 3600)
+        minutes, seconds = divmod(remainder, 60)
         
-        # Send countdown message
+        if hours > 0:
+            time_str = f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+        else:
+            time_str = f"{int(minutes):02d}:{int(seconds):02d}"
+        
+        # Create a countdown button that shows the timer
+        timer_text = f"⏱️ Session ends in: {time_str}"
+        
+        # Create keyboard with timer button and info
+        timer_keyboard = [
+            [InlineKeyboardButton(f"⏱️ {time_str} remaining", callback_data="timer_info")],
+            [InlineKeyboardButton("Session Info", callback_data="session_info")]
+        ]
+        timer_markup = InlineKeyboardMarkup(timer_keyboard)
+        
+        # Send countdown button message
         timer_msg = await context.bot.send_message(
             chat_id=user_id,
-            text=timer_text,
-            parse_mode=ParseMode.MARKDOWN
+            text=(
+                f"*Session Active: {session_type.capitalize()}*\n\n"
+                f"⏱️ Expires at: {expiry_time.strftime('%H:%M:%S')}\n"
+                f"⚠️ Chat history will be cleared when session ends."
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=timer_markup
         )
         
         # Pin this message so it's always visible
@@ -378,29 +386,30 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         except Exception as e:
             logger.warning(f"Could not pin timer message: {e}")
-            
-        # Schedule message updates to simulate countdown (every minute)
-        # Store the message ID in user data for updating
+        
+        # Store the timer message info for updates
         if not hasattr(context.user_data, 'timer_messages'):
             context.user_data['timer_messages'] = {}
+        
         context.user_data['timer_messages'][user_id] = {
             'message_id': timer_msg.message_id,
             'expiry_time': expiry_time,
             'session_type': session_type
         }
         
-        # Start a background task to update the timer
-        asyncio.create_task(update_timer(context, user_id, timer_msg.message_id, expiry_time, session_type))
-            
+        # Start a background task to update the timer button
+        asyncio.create_task(update_timer_button(context, user_id, timer_msg.message_id, expiry_time, session_type))
+        
         # For extended sessions, schedule chat clearing after the session expires
         if session_type == "extended":
             # Schedule chat history clearing after the session expires
             # We'll provide a small buffer (5 minutes) after the session expires
             clear_delay = int(session_timeout.total_seconds()) + 300  # Session timeout + 5 minutes
+            logger.info(f"Scheduling chat clear for user {user_id} in {clear_delay} seconds")
             await schedule_chat_clear(context, user_id, clear_delay)
         
     except Exception as e:
-        logger.error(f"Failed to create session timer: {e}")
+        logger.error(f"Failed to create session timer button: {e}")
         
         # Send a simple fallback message if timer creation fails
         await context.bot.send_message(
@@ -412,8 +421,8 @@ async def session_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     return ConversationHandler.END
 
-async def update_timer(context: ContextTypes.DEFAULT_TYPE, user_id: int, message_id: int, expiry_time: datetime, session_type: str) -> None:
-    """Update the countdown timer message regularly."""
+async def update_timer_button(context: ContextTypes.DEFAULT_TYPE, user_id: int, message_id: int, expiry_time: datetime, session_type: str) -> None:
+    """Update the countdown timer button regularly."""
     try:
         # Check if user is still authenticated
         while bot_data.is_session_valid(user_id):
@@ -439,31 +448,35 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE, user_id: int, message
             minutes, seconds = divmod(remainder, 60)
             
             if hours > 0:
-                time_str = f"{int(hours)}:{int(minutes):02d}:{int(seconds):02d}"
-                duration_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                time_str = f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
             else:
                 time_str = f"{int(minutes):02d}:{int(seconds):02d}"
-                duration_str = f"{int(minutes)}m {int(seconds)}s"
             
-            # Prepare the updated message
-            timer_text = (
-                f"⏱️ *Session Countdown*\n\n"
-                f"Time remaining: `{time_str}`\n"
-                f"Session expires at: {expiry_time.strftime('%H:%M:%S')}\n\n"
-                f"📝 Session type: {session_type.capitalize()}\n"
-                f"⚠️ _Chat history will be cleared when session ends_"
-            )
+            # Create a countdown button that shows the timer
+            timer_text = f"⏱️ Session ends in: {time_str}"
+            
+            # Create keyboard with timer button and info
+            timer_keyboard = [
+                [InlineKeyboardButton(f"⏱️ {time_str} remaining", callback_data="timer_info")],
+                [InlineKeyboardButton("Session Info", callback_data="session_info")]
+            ]
+            timer_markup = InlineKeyboardMarkup(timer_keyboard)
             
             # Update the message
             try:
                 await context.bot.edit_message_text(
                     chat_id=user_id,
                     message_id=message_id,
-                    text=timer_text,
-                    parse_mode=ParseMode.MARKDOWN
+                    text=(
+                        f"*Session Active: {session_type.capitalize()}*\n\n"
+                        f"⏱️ Expires at: {expiry_time.strftime('%H:%M:%S')}\n"
+                        f"⚠️ Chat history will be cleared when session ends."
+                    ),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=timer_markup
                 )
             except Exception as e:
-                logger.warning(f"Could not update timer message: {e}")
+                logger.warning(f"Could not update timer button: {e}")
                 
             # Wait for the next update (update more frequently as time gets closer)
             if time_left.total_seconds() > 300:  # More than 5 minutes
@@ -474,7 +487,7 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE, user_id: int, message
                 await asyncio.sleep(10)  # Update every 10 seconds in the last minute
                 
     except Exception as e:
-        logger.error(f"Error updating countdown timer: {e}")
+        logger.error(f"Error updating timer button: {e}")
     finally:
         # Ensure we clear user data
         if user_id in context.user_data.get('timer_messages', {}):
@@ -598,9 +611,9 @@ async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 del bot_data.authenticated_users[str(target_user_id)]
             
             bot_data.save_to_file()
-            await update.message.reply_text(f"User {target_user_id} has been blocked.")
+            await update.message.reply_text(f"User {target_id} has been blocked.")
         else:
-            await update.message.reply_text(f"User {target_user_id} is already blocked.")
+            await update.message.reply_text(f"User {target_id} is already blocked.")
     except ValueError:
         await update.message.reply_text("Please provide a valid user ID (numbers only).")
 
@@ -627,9 +640,9 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if target_user_id in bot_data.blocked_users:
             bot_data.blocked_users.remove(target_user_id)
             bot_data.save_to_file()
-            await update.message.reply_text(f"User {target_user_id} has been unblocked.")
+            await update.message.reply_text(f"User {target_id} has been unblocked.")
         else:
-            await update.message.reply_text(f"User {target_user_id} is not blocked.")
+            await update.message.reply_text(f"User {target_id} is not blocked.")
     except ValueError:
         await update.message.reply_text("Please provide a valid user ID (numbers only).")
 
@@ -819,10 +832,12 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if not hasattr(context.bot_data, 'message_map'):
                 context.bot_data['message_map'] = {}
             
-            # Map the admin message ID to the group message ID
+            # Map the admin message ID to BOTH group messages 
+            # (use the media message ID as primary for /showme)
             context.bot_data['message_map'][str(admin_msg.message_id)] = {
                 'chat_id': GROUP_ID,
-                'message_id': group_msg.message_id,
+                'message_id': group_msg.message_id,  # Use the media message ID
+                'info_message_id': group_msg.message_id,   # Store the info message ID too
                 'sender_id': user_id,
                 'sender_name': user_name,
                 'media_type': "Message"
@@ -1517,62 +1532,58 @@ async def delete_message_after_delay(message, delay_seconds):
         if "message to delete not found" not in str(e).lower():
             logger.warning(f"Could not delete message: {e}")
 
-async def clearall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clear all authenticated users except the admin."""
-    user_id = update.effective_user.id
+async def clear_chat_history(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear chat history for a user."""
+    job = context.job
+    user_id = job.data["user_id"]
     
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("Only the admin can clear all authenticated users.")
-        return
-    
-    # Ask for confirmation
-    keyboard = [
-        [InlineKeyboardButton("Yes, clear all users", callback_data="confirm_clearall")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel_clearall")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "⚠️ *WARNING*: This will remove all authenticated users except you.\n"
-        "Are you sure you want to continue?",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def clear_chat_history(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
-    """Clear chat history by sending a special service message."""
     try:
-        # Use Telegram's deleteHistory method to clear chat history
+        logger.info(f"Executing chat history clear for user {user_id}")
+        
+        # Send message before clearing
         await context.bot.send_message(
             chat_id=user_id,
-            text="Session ended. Clearing chat history..."
+            text="🧹 *Clearing chat history...*\nYour session has ended.",
+            parse_mode=ParseMode.MARKDOWN
         )
         
-        # Use the Telegram API to delete chat history
-        # This requires the appropriate bot permissions
+        await asyncio.sleep(2)  # Give time for message to be seen
+        
+        # Delete all messages in the chat
         await context.bot.delete_chat_history(chat_id=user_id)
         
-        # Send a notification that will self-destruct
-        clear_msg = await context.bot.send_message(
+        # Notify user that history was cleared
+        await context.bot.send_message(
             chat_id=user_id,
-            text="Chat history has been cleared. Please authenticate again with /start if needed."
+            text="✅ Chat history has been cleared for privacy.\nStart a new session with /start if needed.",
+            parse_mode=ParseMode.MARKDOWN
         )
         
-        # Auto-delete the notification after 10 seconds
-        asyncio.create_task(delete_message_after_delay(clear_msg, 10))
-        
-        logger.info(f"Cleared chat history for user {user_id}")
+        logger.info(f"Successfully cleared chat history for user {user_id}")
     except Exception as e:
         logger.error(f"Failed to clear chat history for user {user_id}: {e}")
+        try:
+            # Notify user of failure
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="⚠️ Could not automatically clear chat history. Please clear it manually for privacy.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception:
+            pass
 
 async def schedule_chat_clear(context: ContextTypes.DEFAULT_TYPE, user_id: int, delay_seconds: int) -> None:
-    """Schedule clearing chat history after the specified delay."""
-    # Schedule the chat history clear
-    context.application.create_task(
-        wait_and_clear_chat(context, user_id, delay_seconds)
-    )
-    
-    logger.info(f"Scheduled chat history clear for user {user_id} in {delay_seconds} seconds")
+    """Schedule clearing chat history after session ends."""
+    try:
+        logger.info(f"Scheduled chat clear for user {user_id} in {delay_seconds} seconds")
+        # Add job to job queue
+        context.job_queue.run_once(
+            clear_chat_history,
+            delay_seconds,
+            data={"user_id": user_id}
+        )
+    except Exception as e:
+        logger.error(f"Error scheduling chat clear: {e}")
 
 async def wait_and_clear_chat(context: ContextTypes.DEFAULT_TYPE, user_id: int, delay_seconds: int) -> None:
     """Wait for the specified delay and then clear chat history."""
@@ -1582,6 +1593,105 @@ async def wait_and_clear_chat(context: ContextTypes.DEFAULT_TYPE, user_id: int, 
     if not bot_data.is_session_valid(user_id):
         await clear_chat_history(context, user_id)
     # Otherwise, the session is still valid, so don't clear yet
+
+async def clearall_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all authenticated users except the admin."""
+    user_id = update.effective_user.id
+    
+    # Only the admin can use this command
+    if str(user_id) != ADMIN_USER_ID:
+        await update.message.reply_text("❌ This command is only available to the admin.")
+        return
+    
+    # Count authenticated users
+    auth_count = len(bot_data.authenticated_users)
+    
+    if auth_count == 0:
+        await update.message.reply_text("ℹ️ There are no authenticated users to clear.")
+        return
+    
+    # Ask for confirmation with inline keyboard
+    keyboard = [
+        [InlineKeyboardButton("Yes, clear all", callback_data="confirm_clearall")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel_clearall")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"⚠️ *WARNING*\nThis will remove *{auth_count}* authenticated users and terminate all active sessions.\n\n"
+        f"Are you sure you want to continue?",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def clearall_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle clearall confirmation button."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    if str(user_id) != ADMIN_USER_ID:
+        await query.answer("You are not authorized to perform this action.", show_alert=True)
+        return
+    
+    action = query.data
+    
+    if action == "confirm_clearall":
+        # Get list of users before clearing
+        users_to_clear = list(bot_data.authenticated_users.keys())
+        user_count = len(users_to_clear)
+        
+        # Reset authenticated users
+        bot_data.authenticated_users = {}
+        bot_data.save_to_file()
+        
+        # Update the callback message
+        await query.edit_message_text(
+            f"✅ Successfully cleared {user_count} authenticated users.\n"
+            f"All sessions have been terminated."
+        )
+        
+        # Notify users that their sessions were terminated
+        for user_id_str in users_to_clear:
+            try:
+                user_id_int = int(user_id_str)
+                
+                # Skip if it's the admin (though we've already excluded admin from the list)
+                if user_id_str == ADMIN_USER_ID:
+                    continue
+                
+                # Send notification to the user
+                await context.bot.send_message(
+                    chat_id=user_id_int,
+                    text="⚠️ *Your session has been terminated by admin.*\n"
+                         "You must authenticate again with /start to continue.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                # Clear their chat history
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id_int,
+                        text="🧹 Clearing chat history for privacy...",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    await asyncio.sleep(1)
+                    await context.bot.delete_chat_history(chat_id=user_id_int)
+                    await context.bot.send_message(
+                        chat_id=user_id_int,
+                        text="✅ Chat history cleared.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to clear chat history for user {user_id_int}: {e}")
+                
+            except Exception as e:
+                logger.error(f"Failed to notify user {user_id_str} of session termination: {e}")
+    
+    elif action == "cancel_clearall":
+        await query.edit_message_text("❌ Clear all operation canceled.")
+    
+    # Answer the callback query
+    await query.answer()
 
 def main() -> None:
     """Start the bot."""
@@ -1596,52 +1706,64 @@ def main() -> None:
             SESSION_SELECTION: [CallbackQueryHandler(session_selection, pattern="^session_")],
         },
         fallbacks=[CommandHandler("start", start)],
+        per_message=True,
     )
     application.add_handler(conv_handler)
     
-    # Command handlers
+    # Add button callback handlers
+    application.add_handler(CallbackQueryHandler(timer_info_callback, pattern="^timer_info$"))
+    application.add_handler(CallbackQueryHandler(session_info_callback, pattern="^session_info$"))
+    application.add_handler(CallbackQueryHandler(terminate_session_callback, pattern="^terminate_"))
+    application.add_handler(CallbackQueryHandler(block_user_callback, pattern="^block_"))
+    application.add_handler(CallbackQueryHandler(clearall_callback, pattern="^(confirm|cancel)_clearall$"))
+    
+    # Add command handlers
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("cmd", cmd_command))
+    application.add_handler(CommandHandler("cmd", help_command))  # Alias for help
     application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("setupgroup", setup_group))
-    application.add_handler(CommandHandler("broadcast", broadcast_command))
-    application.add_handler(CommandHandler("block", block_user))
-    application.add_handler(CommandHandler("unblock", unblock_user))
-    application.add_handler(CommandHandler("users", list_users))
-    application.add_handler(CommandHandler("setquestion", set_security_question))
     application.add_handler(CommandHandler("showme", showme_command))
-    application.add_handler(CommandHandler("clearall", clearall_command))
+    application.add_handler(CommandHandler("authenticate", manual_authenticate_command, filters=filters.User(username=ADMIN_USERNAME)))
+    application.add_handler(CommandHandler("revoke", revoke_command, filters=filters.User(username=ADMIN_USERNAME)))
+    application.add_handler(CommandHandler("block", block_command, filters=filters.User(username=ADMIN_USERNAME)))
+    application.add_handler(CommandHandler("unblock", unblock_command, filters=filters.User(username=ADMIN_USERNAME)))
+    application.add_handler(CommandHandler("backup", backup_command, filters=filters.User(username=ADMIN_USERNAME)))
+    application.add_handler(CommandHandler("clearall", clearall_command, filters=filters.User(username=ADMIN_USERNAME)))
     
-    # Button callback handler
-    application.add_handler(CallbackQueryHandler(button_callback))
+    # Add message handlers
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, 
+        lambda update, context: asyncio.create_task(relay_message(update, context))
+    ))
     
-    # Message handlers - using simplified filters
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay_message))
+    # Add media handlers
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | 
+         filters.DOCUMENT | filters.STICKER | filters.ANIMATION) & 
+        filters.ChatType.PRIVATE,
+        lambda update, context: asyncio.create_task(handle_media(update, context))
+    ))
     
-    # Media handler for all non-text messages
-    application.add_handler(MessageHandler(~filters.TEXT, handle_media))
-    
-    # Error handler
+    # Add error handler
     application.add_error_handler(error_handler)
     
-    # Register bot commands on startup
-    application.post_init = register_bot_commands
+    # Register the commands at startup
+    asyncio.create_task(register_bot_commands(application))
     
-    # Determine if running on Railway
-    if RAILWAY_STATIC_URL:
-        # Set webhook for Railway deployment
-        webhook_url = f"{RAILWAY_STATIC_URL}/{BOT_TOKEN}"
+    # Create backup directory if it doesn't exist
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    
+    # Run the bot
+    if 'RAILWAY_ENVIRONMENT' in os.environ:
+        # Railway deployment - use webhook
         application.run_webhook(
             listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=webhook_url
+            port=int(os.environ.get("PORT", 8443)),
+            webhook_url=os.environ.get("WEBHOOK_URL"),
+            secret_token=os.environ.get("SECRET_TOKEN", "")
         )
-        logger.info(f"Bot running in webhook mode on Railway.app at port {PORT}")
     else:
-        # Run the bot locally in polling mode
-        application.run_polling()
-        logger.info("Bot running in polling mode")
+        # Local deployment - use polling
+        application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
